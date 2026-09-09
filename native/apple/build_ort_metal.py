@@ -122,8 +122,8 @@ def main():
                         "CMAKE_POLICY_VERSION_MINIMUM=3.5",
                     ],
                     "macosx": ["--macos=MacOSX", "--apple_deploy_target=13.3"],
-                    "iphoneos": ["--ios", "--apple_deploy_target=15.1"],
-                    "iphonesimulator": ["--ios", "--apple_deploy_target=15.1"],
+                    "iphoneos": ["--ios", "--apple_deploy_target=16.3"],
+                    "iphonesimulator": ["--ios", "--apple_deploy_target=16.3"],
                 },
             }
             if platform == "ios":

@@ -6,7 +6,7 @@ Pod::Spec.new do |s|
   s.license = { :type => 'GPL-3.0', :file => '../LICENSE' }
   s.author = 'Venera contributors'
   s.source = { :git => 'https://github.com/kiastr/Venera-SSR.git', :tag => s.version.to_s }
-  s.ios.deployment_target = '15.1'
+  s.ios.deployment_target = '16.3'
   s.osx.deployment_target = '13.3'
   s.ios.dependency 'Flutter'
   s.osx.dependency 'FlutterMacOS'
