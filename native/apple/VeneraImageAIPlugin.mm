@@ -44,7 +44,7 @@ double Number(NSDictionary* args, NSString* key, double fallback) {
   }
   return [value doubleValue];
 }
-bool Boolean(NSDictionary* args, NSString* key, bool fallback = false) {
+bool BoolArgument(NSDictionary* args, NSString* key, bool fallback = false) {
   id value = args[key];
   if (!value) return fallback;
   if (CFGetTypeID((__bridge CFTypeRef)value) != CFBooleanGetTypeID()) {
@@ -222,7 +222,7 @@ struct Job {
       job->request.intensity = Number(args, @"intensity", 1);
       job->request.strength = Number(args, @"strength", 1);
       job->request.output_scale = Number(args, @"outputScale", 0);
-      job->request.force_reprocess = Boolean(args, @"forceReprocess");
+      job->request.force_reprocess = BoolArgument(args, @"forceReprocess");
     }
     const NSUInteger bytes = job->bytes.length;
     const uint64_t generation = _worker->generation;

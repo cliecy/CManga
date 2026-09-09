@@ -24,7 +24,6 @@ PODS:
     - FlutterMacOS
   - lodepng_flutter (0.0.1):
     - FlutterMacOS
-  - onnxruntime-c (1.22.0)
   - OrderedSet (6.0.3)
   - path_provider_foundation (0.0.1):
     - Flutter
@@ -62,8 +61,9 @@ PODS:
   - VeneraImageAI (1.0.0):
     - Flutter
     - FlutterMacOS
-    - onnxruntime-c (= 1.22.0)
+    - VeneraOnnxRuntime (= 1.29.0)
     - VeneraOpenCV (= 4.11.0)
+  - VeneraOnnxRuntime (1.29.0)
   - VeneraOpenCV (4.11.0)
   - window_manager (0.2.0):
     - FlutterMacOS
@@ -91,13 +91,13 @@ DEPENDENCIES:
   - sqlite3_flutter_libs (from `Flutter/ephemeral/.symlinks/plugins/sqlite3_flutter_libs/darwin`)
   - url_launcher_macos (from `Flutter/ephemeral/.symlinks/plugins/url_launcher_macos/macos`)
   - VeneraImageAI (from `../native`)
+  - VeneraOnnxRuntime (from `../build/apple-ort/macos/package`)
   - VeneraOpenCV (from `../native/VeneraOpenCV.podspec`)
   - window_manager (from `Flutter/ephemeral/.symlinks/plugins/window_manager/macos`)
   - zip_flutter (from `Flutter/ephemeral/.symlinks/plugins/zip_flutter/macos`)
 
 SPEC REPOS:
   trunk:
-    - onnxruntime-c
     - OrderedSet
     - sqlite3
 
@@ -142,6 +142,8 @@ EXTERNAL SOURCES:
     :path: Flutter/ephemeral/.symlinks/plugins/url_launcher_macos/macos
   VeneraImageAI:
     :path: "../native"
+  VeneraOnnxRuntime:
+    :path: "../build/apple-ort/macos/package"
   VeneraOpenCV:
     :podspec: "../native/VeneraOpenCV.podspec"
   window_manager:
@@ -162,7 +164,6 @@ SPEC CHECKSUMS:
   FlutterMacOS: d0db08ddef1a9af05a5ec4b724367152bb0500b1
   local_auth_darwin: 553ce4f9b16d3fdfeafce9cf042e7c9f77c1c391
   lodepng_flutter: db7bc80ff4dd22e03eca4dde71ba03743a056728
-  onnxruntime-c: 7f778680e96145956c0a31945f260321eed2611a
   OrderedSet: e539b66b644ff081c73a262d24ad552a69be3a94
   path_provider_foundation: 080d55be775b7414fd5a5ef3ac137b97b097e564
   rhttp: 08d791d6373089de796318f4cfb172cbcf34e78b
@@ -172,11 +173,12 @@ SPEC CHECKSUMS:
   sqlite3: 3c950dc86011117c307eb0b28c4a7bb449dce9f1
   sqlite3_flutter_libs: 3c323550ef3b928bc0aa9513c841e45a7d242832
   url_launcher_macos: 0fba8ddabfc33ce0a9afe7c5fef5aab3d8d2d673
-  VeneraImageAI: 02fe51dabaae4a9e6139ac849b69eea02dfec186
+  VeneraImageAI: c876ea5245d37093ced27ffc134183a55440d411
+  VeneraOnnxRuntime: 24f4b96994e10a846dee4541dd890257a8c37232
   VeneraOpenCV: 955dd73325b65851dca44f5ddf3be2d0d52513a0
   window_manager: 1d01fa7ac65a6e6f83b965471b1a7fdd3f06166c
   zip_flutter: 84647ba324a4827db98058f749394752867ac052
 
-PODFILE CHECKSUM: 60305f46f4a5d26c9b36211fc10bb2a49f165614
+PODFILE CHECKSUM: 33eee627cfc10757bc602e467e8f3046082d2430
 
 COCOAPODS: 1.17.0

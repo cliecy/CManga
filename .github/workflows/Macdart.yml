@@ -16,14 +16,22 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Cache pinned native Metal runtime
-        uses: actions/cache@v4
+      - name: Restore pinned native Metal runtime
+        id: metal-cache
+        uses: actions/cache/restore@v4
         with:
           path: build/apple-ort
           key: apple-ort-macos-${{ runner.arch }}-${{ hashFiles('native/apple/build_ort_metal.py', 'native/apple/ort-metal.patch', 'native/apple/VeneraOnnxRuntime.podspec') }}
 
       - name: Build native ONNX WebGPU Metal dependency
         run: python3 native/apple/build_ort_metal.py --platform macos
+
+      - name: Save completed native Metal runtime
+        if: steps.metal-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/apple-ort
+          key: ${{ steps.metal-cache.outputs.cache-primary-key }}
       
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -110,13 +118,16 @@ jobs:
           path: build/ai-smoke-results/
           if-no-files-found: warn
 
-      # 新增打包步骤（原先裸上传 Venera.app/ 目录）
       - name: Package macOS Build
         run: |
           VERSION=$(grep "^version:" pubspec.yaml | head -1 | sed 's/version: //' | cut -d+ -f1)
           ZIP_NAME="Venera-macOS-v$VERSION.zip"
           cd build/macos/Build/Products/Release
-          zip -r "$ZIP_NAME" *.app
+          ditto -c -k --sequesterRsrc --keepParent *.app "$ZIP_NAME"
+          VERIFY_DIR="$(mktemp -d)"
+          ditto -x -k "$ZIP_NAME" "$VERIFY_DIR"
+          codesign --verify --deep --strict "$VERIFY_DIR/"*.app
+          rm -rf "$VERIFY_DIR"
         
       - name: Upload macOS Build
         uses: actions/upload-artifact@v4
