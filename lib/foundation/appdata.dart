@@ -254,6 +254,7 @@ class Settings with ChangeNotifier {
     'anime4KEnhancementStrength':
         1.0, // blend between resized source and enhanced output
     'imageAiBackend': 'auto', // platform acceleration with CPU fallback, or cpu
+    'imageAiCacheSizeMiB': 2048, // shared AI disk cache pool (2 GiB)
     'enableColorization': false, // enable image colorization
     'colorizationIntensity': 1.0, // color concentration (0.0 - 1.2)
   };

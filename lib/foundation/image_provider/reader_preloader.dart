@@ -23,6 +23,7 @@ class ReaderPreloader {
   final _readers = <int, _PageReaders>{};
   final _failures = <int, ({Object error, StackTrace stack})>{};
   final _records = <int, ReaderImageDetails>{};
+  final _completed = <int, ReaderImageDetails>{};
   final _force = <int>{};
   final _versions = <int, int>{};
   int? _first;
@@ -104,6 +105,26 @@ class ReaderPreloader {
     if (_disposed || _pages[page.page]?.key != page.key) {
       throw const ReaderProcessingCancelled();
     }
+    final completed = _completed[page.page];
+    final cacheRef = completed?.cacheRef;
+    if (cacheRef != null) {
+      final generation = _generation;
+      final version = _versions[page.page] ?? 0;
+      final bytes = await cacheRef.read();
+      if (_disposed ||
+          generation != _generation ||
+          version != (_versions[page.page] ?? 0)) {
+        throw const ReaderProcessingCancelled();
+      }
+      if (bytes != null) {
+        ReaderImageDetailsStore.instance.update(
+          completed!,
+          values: {'Page reload': 'Rendered image cache'},
+        );
+        return bytes;
+      }
+      _completed.remove(page.page);
+    }
     final failure = _failures[page.page];
     if (failure != null) {
       Error.throwWithStackTrace(failure.error, failure.stack);
@@ -127,6 +148,7 @@ class ReaderPreloader {
     if (_disposed || _pages[page.page]?.key != page.key) {
       throw const ReaderProcessingCancelled();
     }
+    _completed.remove(page.page);
     if (_force.add(page.page)) {
       _versions.update(page.page, (value) => value + 1, ifAbsent: () => 1);
     }
@@ -232,7 +254,7 @@ class ReaderPreloader {
         try {
           ReaderImageDetailsStore.instance.update(
             _records[page]!,
-            state: 'Processing',
+            state: 'Loading',
           );
           final bytes = await provider.loadForQueue(
             events,
@@ -245,6 +267,8 @@ class ReaderPreloader {
             _records[page]!,
             state: 'Complete',
           );
+          final record = _records[page]!;
+          if (record.cacheRef != null) _completed[page] = record;
           _pending.remove(page);
           _records.remove(page);
           _readers.remove(page)?.result.complete(bytes);
@@ -290,6 +314,7 @@ class ReaderPreloader {
     _pending.clear();
     _failures.clear();
     _records.clear();
+    _completed.clear();
     _force.clear();
     _versions.clear();
     _first = _last = null;

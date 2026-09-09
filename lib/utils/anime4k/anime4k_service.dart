@@ -41,7 +41,7 @@ class Anime4KService {
 
   Future<void> init() async {
     try {
-      await _cache.init();
+      await ImageAiService.instance.updateCacheLimits();
     } catch (error) {
       Log.error('Anime4K', 'Anime4K cache init error: $error');
     }
@@ -53,19 +53,30 @@ class Anime4KService {
   String _cacheIdentity(String key) =>
       sha256.convert(utf8.encode(key)).toString();
 
-  Future<Uint8List?> _getFromCache(String key) async {
+  Future<Uint8List?> _getFromCache(String key, String? scope) async {
     try {
-      return (await _cache.read(_cacheGroup(key), _cacheIdentity(key)))?.bytes;
+      return (await _cache.read(
+        _cacheGroup(key),
+        _cacheIdentity(key),
+        scope: scope,
+      ))?.bytes;
     } on FileSystemException {
       return null;
     }
   }
 
-  Future<void> _saveToCache(String key, Uint8List bytes) async {
+  Future<bool> _saveToCache(String key, Uint8List bytes, String? scope) async {
     try {
-      await _cache.write(_cacheGroup(key), _cacheIdentity(key), bytes);
+      await _cache.write(
+        _cacheGroup(key),
+        _cacheIdentity(key),
+        bytes,
+        scope: scope,
+      );
+      return true;
     } catch (error) {
       Log.error('Anime4K', 'Anime4K cache save error: $error');
+      return false;
     }
   }
 
@@ -85,6 +96,7 @@ class Anime4KService {
     double strength = 1.0,
     bool forceReprocess = false,
     void Function(ImageAiStatus)? onStatus,
+    String? cacheScope,
   }) async {
     if (Platform.isMacOS || Platform.isIOS) {
       ImageAiService.instance.reportError(
@@ -114,27 +126,41 @@ class Anime4KService {
       onStatus?.call(ImageAiService.instance.status.value);
       return null;
     }
+    await ImageAiService.instance.updateCacheLimits();
     final inputId = sha256.convert(imageBytes).toString();
     final baseKey =
         'v1-base-v3:$inputId:$scaleFactor:$pushStrength:$pushGradStrength';
     final fullKey = 'v1-render-v3:$baseKey:$strength';
-    final requestKey = '$fullKey:$forceReprocess';
+    final generation = _generation;
+    final cacheRef = ImageAiCacheRef(
+      _cacheGroup(fullKey),
+      _cacheIdentity(fullKey),
+      scope: cacheScope,
+    );
+    final requestKey = jsonEncode([
+      generation,
+      cacheScope,
+      fullKey,
+      forceReprocess,
+    ]);
     final existing = _inFlight[requestKey];
     if (existing != null) {
       final result = (await existing)!;
       onStatus?.call(result.status);
       return result.bytes;
     }
-    final generation = _generation;
     final future = _enqueueTask<({Uint8List? bytes, ImageAiStatus status})>(
       () async {
         try {
-          final cached = forceReprocess ? null : await _getFromCache(fullKey);
+          final cached = forceReprocess
+              ? null
+              : await _getFromCache(fullKey, cacheScope);
           if (cached != null) {
-            const resultStatus = ImageAiStatus(
+            final resultStatus = ImageAiStatus(
               message: 'v1 rendered image cache (CPU)',
               backend: 'cpu',
               cacheHit: true,
+              cacheRef: cacheRef,
             );
             ImageAiService.instance.status.value = resultStatus;
             return (bytes: cached, status: resultStatus);
@@ -144,10 +170,13 @@ class Anime4KService {
             backend: 'cpu',
             isProcessing: true,
           );
+          onStatus?.call(ImageAiService.instance.status.value);
           Uint8List? enhanced;
           var baseCacheHit = false;
           if (strength > 0) {
-            enhanced = forceReprocess ? null : await _getFromCache(baseKey);
+            enhanced = forceReprocess
+                ? null
+                : await _getFromCache(baseKey, cacheScope);
             baseCacheHit = enhanced != null;
             enhanced ??= await Anime4KUpscaler.processInIsolate(
               Anime4KParams(
@@ -161,7 +190,7 @@ class Anime4KService {
               throw StateError('v1 could not decode or enhance this image');
             }
             if (!baseCacheHit && generation == _generation) {
-              await _saveToCache(baseKey, enhanced);
+              await _saveToCache(baseKey, enhanced, cacheScope);
             }
           }
           final result = await Anime4KUpscaler.renderInIsolate(
@@ -172,7 +201,9 @@ class Anime4KService {
               strength: strength,
             ),
           );
-          if (generation == _generation) await _saveToCache(fullKey, result);
+          final saved =
+              generation == _generation &&
+              await _saveToCache(fullKey, result, cacheScope);
           final resultStatus = ImageAiStatus(
             message: strength == 0
                 ? 'Base image resized; v1 enhancement skipped'
@@ -181,6 +212,7 @@ class Anime4KService {
                 : 'v1 super-resolution complete (CPU)',
             backend: 'cpu',
             cacheHit: baseCacheHit,
+            cacheRef: saved ? cacheRef : null,
           );
           ImageAiService.instance.status.value = resultStatus;
           return (bytes: result, status: resultStatus);
@@ -264,9 +296,12 @@ class Anime4KService {
   /// Clear rendered images without discarding reusable algorithm results.
   Future<void> clearCache() async {
     _generation++;
+    await ImageAiService.instance.updateCacheLimits();
     await _enqueueTask<void>(() => _cache.clear('v1_render'));
   }
 
-  Future<int> getCacheSize() async =>
-      await _cache.size('v1_base') + await _cache.size('v1_render');
+  Future<int> getCacheSize() async {
+    await ImageAiService.instance.updateCacheLimits();
+    return await _cache.size('v1_base') + await _cache.size('v1_render');
+  }
 }

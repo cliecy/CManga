@@ -3,6 +3,7 @@ import 'dart:collection';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:venera/utils/image_ai_cache.dart';
 
 /// Metadata only: never retains decoded images or encoded page bytes.
 class ReaderImageDetails {
@@ -14,6 +15,7 @@ class ReaderImageDetails {
   late final Map<String, String> values = UnmodifiableMapView(_values);
   String state = 'Loading';
   bool isStale = false;
+  ImageAiCacheRef? cacheRef;
 }
 
 class ReaderImageDetailsStore extends ChangeNotifier {

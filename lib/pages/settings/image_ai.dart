@@ -20,6 +20,126 @@ Future<bool> _allowImageAi(BuildContext context) async {
   return supported;
 }
 
+class _ImageAiCacheLimit extends StatelessWidget {
+  const _ImageAiCacheLimit({this.comicId, this.comicSource});
+
+  final String? comicId;
+  final String? comicSource;
+
+  bool get _isComic => comicId != null && comicSource != null;
+
+  int? get _override {
+    if (!_isComic) return null;
+    final entry =
+        appdata.settings['comicSpecificSettings']['$comicId@$comicSource'];
+    final value = entry?['imageAiCacheSizeMiB'];
+    return entry?['enabled'] == true && value is int && value > 0
+        ? value
+        : null;
+  }
+
+  String _sizeLabel(int mib) => '@mib MiB (@gib GiB)'.tlParams({
+    'mib': mib.toString(),
+    'gib': (mib / 1024).toStringAsFixed(3),
+  });
+
+  Future<void> _save(int? mib) async {
+    if (_isComic) {
+      appdata.settings.setReaderSetting(
+        comicId!,
+        comicSource!,
+        'imageAiCacheSizeMiB',
+        mib,
+      );
+    } else {
+      appdata.settings['imageAiCacheSizeMiB'] = mib!;
+    }
+    await appdata.saveData();
+    await ImageAiService.instance.updateCacheLimits();
+  }
+
+  Future<void> _enterValue(BuildContext context) async {
+    final value = _isComic
+        ? _override
+        : appdata.settings['imageAiCacheSizeMiB'];
+    await showInputDialog(
+      context: context,
+      title:
+          (_isComic
+                  ? 'Independent AI cache quota (MiB)'
+                  : 'Shared AI cache limit (MiB)')
+              .tl,
+      initialValue: value?.toString(),
+      hintText: '1 – 1048576 MiB (1 TiB)',
+      onConfirm: (text) async {
+        final entered = int.tryParse(text.trim(), radix: 10);
+        if (entered == null || entered < 1 || entered > 1048576) {
+          return 'Enter a whole number from 1 to 1048576 MiB'.tl;
+        }
+        await _save(entered);
+        return null;
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: appdata.settings,
+      builder: (context, _) {
+        final quota = _override;
+        final sharedSize = _sizeLabel(appdata.settings['imageAiCacheSizeMiB']);
+        final size = _isComic && quota == null
+            ? 'Using shared pool: @size'.tlParams({'size': sharedSize})
+            : _sizeLabel(quota ?? appdata.settings['imageAiCacheSizeMiB']);
+        final description =
+            (_isComic
+                    ? 'An independent quota covers all AI stages for this comic and is separate from the shared pool. It can increase total disk usage; least recently used (LRU) results are removed first.'
+                    : 'Shared by comics without an independent quota. Super-resolution and colorization share this limit; least recently used (LRU) results are removed first.')
+                .tl;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            ListTile(
+              title: Text(
+                (_isComic
+                        ? 'AI cache quota for this comic'
+                        : 'Shared AI cache pool')
+                    .tl,
+              ),
+              subtitle: Text('$size\n$description'),
+              trailing: _isComic ? null : const Icon(Icons.edit),
+              onTap: () => _enterValue(context),
+            ),
+            if (_isComic)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Wrap(
+                  spacing: 8,
+                  children: [
+                    TextButton(
+                      onPressed: () => _enterValue(context),
+                      child: Text(
+                        (quota == null
+                                ? 'Set independent quota'
+                                : 'Edit independent quota')
+                            .tl,
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: quota == null ? null : () => _save(null),
+                      child: Text('Use shared pool'.tl),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+}
+
 /// Persistent download activity, independent of any settings page's lifetime.
 class ModelDownloadStatusView extends StatelessWidget {
   const ModelDownloadStatusView({super.key});

@@ -15,6 +15,7 @@ import 'package:venera/utils/anime4k/anime4k_service.dart';
 import 'package:venera/utils/anime4k/anime4k_v4_service.dart';
 import 'package:venera/utils/colorization/colorization_service.dart';
 import 'package:venera/utils/processed_image_store.dart';
+import 'package:venera/utils/image_ai_cache.dart';
 import 'reader_image_details.dart';
 import 'reader_preloader.dart';
 
@@ -168,7 +169,7 @@ class ReaderImageProvider
           page,
           values: initialValues,
         );
-    details.update(record, state: 'Processing', values: initialValues);
+    details.update(record, state: 'Loading', values: initialValues);
     var cancelled = false;
     void checkActive() {
       try {
@@ -219,6 +220,8 @@ class ReaderImageProvider
     double parameter(String key, double fallback) =>
         (aiSettings[key] as num?)?.toDouble() ?? fallback;
     final backend = aiSettings['imageAiBackend'] as String? ?? 'auto';
+    final cacheScope = '$cid@${sourceKey ?? 'local'}';
+    ImageAiCacheRef? outputCacheRef;
     Uint8List? imageBytes = sourceBytes;
     if (imageBytes == null) {
       if (imageKey.startsWith('file://')) {
@@ -356,9 +359,9 @@ class ReaderImageProvider
     if (aiSettings['enableAnime4K'] == true) {
       details.update(
         record,
-        state: 'Processing',
+        state: 'Loading',
         values: {
-          'Super-resolution': 'Processing',
+          'Super-resolution': 'Loading',
           'Before super-resolution': finalSize,
         },
       );
@@ -369,6 +372,7 @@ class ReaderImageProvider
         details.update(
           record,
           values: {'Super-resolution execution': value.message},
+          state: value.isProcessing ? 'Processing' : null,
         );
       }
 
@@ -384,6 +388,7 @@ class ReaderImageProvider
           backend: backend,
           forceReprocess: forceReprocess,
           onStatus: onStatus,
+          cacheScope: cacheScope,
         );
       } else {
         enhanced = await Anime4KService.instance.processImage(
@@ -395,6 +400,7 @@ class ReaderImageProvider
           strength: strength,
           forceReprocess: forceReprocess,
           onStatus: onStatus,
+          cacheScope: cacheScope,
         );
       }
       watch.stop();
@@ -405,6 +411,7 @@ class ReaderImageProvider
       );
       if (enhanced != null) {
         bytes = enhanced;
+        outputCacheRef = stageStatus?.cacheRef;
         finalSize = await _dimensions(bytes);
         srSucceeded = true;
         details.update(
@@ -442,8 +449,8 @@ class ReaderImageProvider
     if (aiSettings['enableColorization'] == true) {
       details.update(
         record,
-        state: 'Processing',
-        values: {'Colorization': 'Processing'},
+        state: 'Loading',
+        values: {'Colorization': 'Loading'},
       );
       final watch = Stopwatch()..start();
       ImageAiStatus? stageStatus;
@@ -453,10 +460,12 @@ class ReaderImageProvider
         intensity: parameter('colorizationIntensity', 1.0),
         backend: backend,
         forceReprocess: forceReprocess,
+        cacheScope: cacheScope,
         onStatus: (value) {
           stageStatus = value;
           details.update(
             record,
+            state: value.isProcessing ? 'Processing' : null,
             values: {'Colorization execution': value.message},
           );
         },
@@ -469,6 +478,7 @@ class ReaderImageProvider
       );
       if (colored != null) {
         bytes = colored;
+        outputCacheRef = stageStatus?.cacheRef;
         finalSize = await _dimensions(bytes);
         details.update(
           record,
@@ -503,6 +513,7 @@ class ReaderImageProvider
         );
       }
     }
+    record.cacheRef = outputCacheRef;
     details.update(
       record,
       state: 'Complete',

@@ -105,7 +105,7 @@ class _ReaderSettingsState extends State<ReaderSettings> {
               SwitchListTile(
                 title: Text("Enable comic specific settings".tl),
                 value: isEnabledSpecificSettings,
-                onChanged: (b) {
+                onChanged: (b) async {
                   setState(() {
                     appdata.settings.setEnabledComicSpecificSettings(
                       comicId,
@@ -113,18 +113,20 @@ class _ReaderSettingsState extends State<ReaderSettings> {
                       b,
                     );
                   });
-                  appdata.saveData();
+                  await appdata.saveData();
+                  await ImageAiService.instance.updateCacheLimits();
                   _refreshAiImages();
                 },
               ).toSliver(),
               if (isEnabledSpecificSettings)
                 Center(
                   child: TextButton(
-                    onPressed: () {
+                    onPressed: () async {
                       setState(() {
                         appdata.settings.resetComicReaderSettings(key);
                       });
-                      appdata.saveData();
+                      await appdata.saveData();
+                      await ImageAiService.instance.updateCacheLimits();
                       _refreshAiImages();
                     },
                     child: Text(
@@ -161,6 +163,10 @@ class _ReaderSettingsState extends State<ReaderSettings> {
           },
           comicId: isEnabledSpecificSettings ? widget.comicId : null,
           comicSource: isEnabledSpecificSettings ? widget.comicSource : null,
+        ).toSliver(),
+        _ImageAiCacheLimit(
+          comicId: isEnabledSpecificSettings ? comicId : null,
+          comicSource: isEnabledSpecificSettings ? sourceKey : null,
         ).toSliver(),
         _SwitchSetting(
           title: "Enable Anime4K".tl,

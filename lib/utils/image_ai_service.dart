@@ -7,6 +7,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as path;
+import 'package:venera/foundation/appdata.dart';
 import 'image_ai_cache.dart';
 
 @immutable
@@ -18,6 +19,7 @@ class ImageAiStatus {
   final bool cacheHit;
   final String? errorCode;
   final String? errorDetail;
+  final ImageAiCacheRef? cacheRef;
 
   const ImageAiStatus({
     required this.message,
@@ -27,6 +29,7 @@ class ImageAiStatus {
     this.cacheHit = false,
     this.errorCode,
     this.errorDetail,
+    this.cacheRef,
   });
 }
 
@@ -101,6 +104,40 @@ class ImageAiService {
     return supported;
   });
 
+  Future<void> updateCacheLimits() {
+    int? bytes(dynamic value) {
+      if (value is! num ||
+          !value.isFinite ||
+          value < 1 ||
+          value > 1048576 ||
+          value != value.roundToDouble()) {
+        return null;
+      }
+      return value.toInt() * 1024 * 1024;
+    }
+
+    final overrides = <String, int>{};
+    final comicSettings = appdata.settings['comicSpecificSettings'];
+    if (comicSettings is Map) {
+      for (final entry in comicSettings.entries) {
+        final settings = entry.value;
+        if (entry.key is! String ||
+            settings is! Map ||
+            settings['enabled'] != true) {
+          continue;
+        }
+        final limit = bytes(settings['imageAiCacheSizeMiB']);
+        if (limit != null) overrides[entry.key as String] = limit;
+      }
+    }
+    return _cache.setLimits(
+      defaultMaxBytes:
+          bytes(appdata.settings['imageAiCacheSizeMiB']) ??
+          2 * 1024 * 1024 * 1024,
+      comicMaxBytes: overrides,
+    );
+  }
+
   String resolveBackend(String backend) {
     if (backend != 'auto' && backend != 'cpu' && backend != 'metal') {
       throw ArgumentError('Unknown AI backend: $backend');
@@ -139,6 +176,7 @@ class ImageAiService {
         reportError(_capabilities['reason'] ?? 'Native AI is unavailable');
         return false;
       }
+      await updateCacheLimits();
       _cacheDirectory = await _cache.directory();
       status.value = const ImageAiStatus(
         message: 'AI backend available; select a compatible model',
@@ -285,10 +323,12 @@ class ImageAiService {
     Map<String, dynamic> arguments, {
     void Function(ImageAiStatus)? onStatus,
     bool forceReprocess = false,
+    String? cacheScope,
   }) async {
     var operation = 'AI processing failed';
     try {
       final type = arguments['type'] as String;
+      await updateCacheLimits();
       await _requireSupport(type);
       final bytes = arguments['imageBytes'] as Uint8List;
       final modelPath = arguments['modelPath'] as String;
@@ -326,11 +366,17 @@ class ImageAiService {
           )
           .toString();
       final generation = _generation;
-      final requestKey = '$generation:$key:$forceReprocess';
+      final cacheRef = ImageAiCacheRef(type, key, scope: cacheScope);
+      final requestKey = jsonEncode([
+        generation,
+        cacheScope,
+        key,
+        forceReprocess,
+      ]);
       final active = _inFlight[requestKey];
       if (active != null) {
         final result = await active;
-        onStatus?.call(_resultStatus(result, operation));
+        onStatus?.call(_resultStatus(result, operation, cacheRef));
         return result;
       }
       final future = _serial(() async {
@@ -344,7 +390,9 @@ class ImageAiService {
             'AI model changed while this page was queued; reload the page',
           );
         }
-        final cached = forceReprocess ? null : await _cache.read(type, key);
+        final cached = forceReprocess
+            ? null
+            : await _cache.read(type, key, scope: cacheScope);
         if (cached != null &&
             cached.metadata['backend'] is String &&
             cached.metadata['scale'] is int &&
@@ -357,13 +405,14 @@ class ImageAiService {
             'cacheHit': true,
             'renderedCacheHit': true,
           };
-          status.value = _resultStatus(result, operation);
+          status.value = _resultStatus(result, operation, cacheRef);
           return result;
         }
         status.value = ImageAiStatus(
           message: '$operation: processing',
           isProcessing: true,
         );
+        onStatus?.call(status.value);
         final result = await _channel.invokeMapMethod<String, dynamic>(
           'colorize',
           nativeArgs,
@@ -391,6 +440,7 @@ class ImageAiService {
               key,
               result['imageBytes'] as Uint8List,
               metadata: {...result}..remove('imageBytes'),
+              scope: cacheScope,
             );
           } on FileSystemException catch (error) {
             // Preserve real output, but do not claim it will survive reopening.
@@ -398,13 +448,13 @@ class ImageAiService {
                 'Processed output could not be cached: $error';
           }
         }
-        status.value = _resultStatus(result, operation);
+        status.value = _resultStatus(result, operation, cacheRef);
         return result;
       });
       _inFlight[requestKey] = future;
       try {
         final result = await future;
-        onStatus?.call(_resultStatus(result, operation));
+        onStatus?.call(_resultStatus(result, operation, cacheRef));
         return result;
       } finally {
         _inFlight.remove(requestKey);
@@ -416,7 +466,11 @@ class ImageAiService {
     }
   }
 
-  ImageAiStatus _resultStatus(Map<String, dynamic> result, String operation) {
+  ImageAiStatus _resultStatus(
+    Map<String, dynamic> result,
+    String operation,
+    ImageAiCacheRef cacheRef,
+  ) {
     final backend = result['backend'] as String;
     final hit = result['cacheHit'] == true;
     final fallback = result['fallbackReason'] as String?;
@@ -433,15 +487,20 @@ class ImageAiService {
           '${result['cacheWarning'] == null ? '' : ' — ${result['cacheWarning']}'}',
       backend: backend,
       cacheHit: hit,
+      cacheRef: result['cacheWarning'] == null ? cacheRef : null,
     );
   }
 
   Future<void> clearRenderedCache(String type) async {
     _generation++;
+    await updateCacheLimits();
     await _serial(() => _cache.clear(type));
   }
 
-  Future<int> cacheSize(String type) => _cache.size(type);
+  Future<int> cacheSize(String type) async {
+    await updateCacheLimits();
+    return _cache.size(type);
+  }
 
   Future<void> resetSession() async {
     _generation++;

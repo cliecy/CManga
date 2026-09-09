@@ -83,6 +83,7 @@ class Anime4KV4Service {
     String backend = 'auto',
     bool forceReprocess = false,
     void Function(ImageAiStatus)? onStatus,
+    String? cacheScope,
   }) async {
     var reportedFailure = false;
     try {
@@ -112,6 +113,7 @@ class Anime4KV4Service {
           'outputScale': outputScale,
         },
         forceReprocess: forceReprocess,
+        cacheScope: cacheScope,
         onStatus: (value) {
           reportedFailure = value.isError;
           onStatus?.call(value);

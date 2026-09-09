@@ -1,8 +1,13 @@
 import 'dart:async';
-import 'dart:typed_data';
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/painting.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/services.dart';
+import 'package:crypto/crypto.dart';
+import 'package:image/image.dart' as img;
+import 'package:venera/utils/image_ai_cache.dart';
 import 'package:venera/foundation/image_provider/reader_image.dart';
 import 'package:venera/foundation/image_provider/reader_image_details.dart';
 import 'package:venera/foundation/image_provider/reader_preloader.dart';
@@ -25,6 +30,7 @@ class _ControlledPage extends ReaderImageProvider {
   final _attempts = <Completer<_Attempt>>[];
   var _starts = 0;
   Uint8List? _cached;
+  ImageAiCacheRef? renderedRef;
 
   Completer<_Attempt> _slot(int index) {
     while (_attempts.length <= index) {
@@ -56,6 +62,7 @@ class _ControlledPage extends ReaderImageProvider {
     // Native work can return after cancellation. The queue must independently
     // reject its stale result, even when the provider never calls checkStop.
     final generated = await attempt.result.future;
+    record.cacheRef = renderedRef;
     if (!cacheResults) return generated;
     final bytes = forceReprocess ? generated : _cached ?? generated;
     _cached = bytes;
@@ -91,11 +98,92 @@ class _Chapter {
 }
 
 void main() {
+  final binding = TestWidgetsFlutterBinding.ensureInitialized();
+  late Directory cacheRoot;
+  final diskCache = ImageAiCache.instance;
+  final cachedPng = Uint8List.fromList(
+    img.encodePng(img.Image(width: 2, height: 3)),
+  );
+  final cachedKey = sha256.convert(utf8.encode('reader-return')).toString();
+  late ImageAiCacheRef renderedRef;
+  setUpAll(() async {
+    cacheRoot = await Directory.systemTemp.createTemp('reader-return-');
+    binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      const MethodChannel('plugins.flutter.io/path_provider'),
+      (call) async => '${cacheRoot.path}/${call.method}',
+    );
+    await diskCache.directory();
+    renderedRef = ImageAiCacheRef(
+      'reader_return',
+      cachedKey,
+      scope: 'comic@local',
+    );
+  });
+  tearDownAll(() async {
+    binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      const MethodChannel('plugins.flutter.io/path_provider'),
+      null,
+    );
+    await cacheRoot.delete(recursive: true);
+  });
+
+  test(
+    'completed disk result returns while a later page is still processing',
+    () async {
+      final chapter = _Chapter(2);
+      chapter.page(1).renderedRef = renderedRef;
+      await diskCache.write(
+        'reader_return',
+        cachedKey,
+        cachedPng,
+        scope: 'comic@local',
+      );
+      final firstRead = chapter.read(1);
+      (await chapter.page(1).attempt()).result.complete(cachedPng);
+      expect(await firstRead, cachedPng);
+      final laterRead = chapter.read(2);
+      final later = await chapter.page(2).attempt();
+      try {
+        expect(
+          await chapter.read(1).timeout(const Duration(seconds: 5)),
+          cachedPng,
+        );
+        expect(chapter.page(1).details.state, 'Complete');
+        expect(chapter.started, [1, 2]);
+      } finally {
+        later.succeed(2);
+        await laterRead;
+      }
+      // Explicit reprocessing must bypass the otherwise reusable completed result.
+      final forced = chapter.queue.reprocess(chapter.page(1));
+      (await chapter.page(1).attempt(1)).succeed(9);
+      await forced;
+      expect(chapter.started, [1, 2, 1]);
+    },
+  );
+
+  test('evicted completed result rejoins the processing queue', () async {
+    final chapter = _Chapter(1);
+    chapter.page(1).renderedRef = renderedRef;
+    await diskCache.write(
+      'reader_return',
+      cachedKey,
+      cachedPng,
+      scope: 'comic@local',
+    );
+    final firstRead = chapter.read(1);
+    (await chapter.page(1).attempt()).result.complete(cachedPng);
+    await firstRead;
+    await diskCache.clear('reader_return');
+    final reload = chapter.read(1);
+    (await chapter.page(1).attempt(1)).succeed(7);
+    expect(await reload, [7]);
+    expect(chapter.started, [1, 1]);
+  });
   test('more than 16 admitted pages survive jumps in chapter order', () async {
     final chapter = _Chapter(24, initialPage: 5);
     final visible = chapter.read(5);
     final first = await chapter.page(5).attempt();
-    expect(chapter.page(5).details.state, 'Processing');
 
     chapter.queue.update([chapter.page(24)]);
     chapter.queue.update([chapter.page(12)]);
