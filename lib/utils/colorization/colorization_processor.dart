@@ -3,9 +3,9 @@ import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:venera/foundation/log.dart';
+import 'package:venera/utils/image_ai_service.dart';
 
-/// 模型管理器：负责从网络下载 DeOldify / DDColor 模型到应用目录。
+/// Model lifecycle for compatible DeOldify Artistic and int8 ONNX models.
 ///
 /// 不使用 Flutter assets 打包模型（模型文件 ~243MB 会导致 Android APK 构建失败），
 /// 改为在设置页由用户手动触发下载，避免首次启动即下载大文件。
@@ -24,16 +24,12 @@ class ColorizationModelManager {
   static const modelFileName = 'deoldify_artistic.onnx';
   static const expectedFileSize = 243 * 1024 * 1024; // ~243MB（DeOldify 完整版）
 
-  /// 判定一个 onnx 是否为有效模型的最小体积（8MB）。
-  /// DeOldify 完整版 ~243MB，DDColor int8 轻量版 ~60MB，二者都满足；
-  /// 用统一下限避免把 int8 轻量模型误判为“未下载”。
-  static const int _validModelMinSize = 8 * 1024 * 1024;
-
   /// 默认镜像源（DeOldify，按稳定性排序），用户可在设置页增删
   static const String _modelUrlsKey = 'colorization_model_urls';
 
   /// 是否正在使用“自选外部模型”（落盘到模型调用位置，覆盖下载模型）
-  static const String _customModelActiveKey = 'colorization_custom_model_active';
+  static const String _customModelActiveKey =
+      'colorization_custom_model_active';
 
   /// 自选外部模型的原始文件名（仅用于 UI 展示）
   static const String _customModelNameKey = 'colorization_custom_model_name';
@@ -78,10 +74,9 @@ class ColorizationModelManager {
     if (!_urlsLoaded) {
       final prefs = await SharedPreferences.getInstance();
       final saved = prefs.getStringList(_modelUrlsKey);
-      _modelUrls =
-          (saved != null && saved.isNotEmpty)
-              ? List.from(saved)
-              : List.from(_defaultModelUrls);
+      _modelUrls = (saved != null && saved.isNotEmpty)
+          ? List.from(saved)
+          : List.from(_defaultModelUrls);
       _urlsLoaded = true;
     }
     return List.from(_modelUrls);
@@ -135,28 +130,31 @@ class ColorizationModelManager {
   static Future<void> clearCustomModelSelection() async {
     final dir = await getApplicationSupportDirectory();
     final targetPath = path.join(dir.path, modelFileName);
-    final bakPath = '$targetPath.bak';
-    final targetFile = File(targetPath);
-    if (await targetFile.exists()) {
-      await targetFile.delete();
+    final backup = File('$targetPath.bak');
+    if (await backup.exists()) {
+      await ImageAiService.instance.installStagedModel(
+        backup.path,
+        targetPath,
+        'deoldify',
+      );
+    } else {
+      await ImageAiService.instance.resetSession();
+      final target = File(targetPath);
+      if (await target.exists()) await target.delete();
     }
-    if (await File(bakPath).exists()) {
-      await File(bakPath).rename(targetPath);
-    }
-    _cachedModelPath = null;
     _customModelActive = false;
+    _customModelName = null;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_customModelActiveKey, false);
     await prefs.remove(_customModelNameKey);
   }
 
   /// 标记“模型调用位置的文件”为自选外部模型（写 prefs + 刷新缓存路径）。
-  /// 实际文件拷贝由调用方经原生 [ColorizationService.copyUriTo] 通道完成，
-  /// 本方法只负责记账，使 UI/服务能识别当前处于自选模型状态。
+  /// The caller installs and validates the staged model before updating selection.
   static Future<void> markCustomModelActive(String displayName) async {
     final dir = await getApplicationSupportDirectory();
     final targetPath = path.join(dir.path, modelFileName);
-    _cachedModelPath = targetPath;
+    await ImageAiService.instance.getModelInfo(targetPath, 'deoldify');
     _customModelActive = true;
     _customModelName = displayName;
     final prefs = await SharedPreferences.getInstance();
@@ -164,10 +162,6 @@ class ColorizationModelManager {
     await prefs.setString(_customModelNameKey, displayName);
   }
 
-  /// 有效模型的最小体积（字节），供 UI 侧拷贝后做体积校验
-  static int get validModelMinSize => _validModelMinSize;
-
-  static String? _cachedModelPath;
   static bool _isDownloading = false;
   static double _downloadProgress = 0.0;
   static String? _currentStatus;
@@ -175,29 +169,11 @@ class ColorizationModelManager {
   /// 获取模型文件路径（即模型调用位置）。
   /// 不自动下载；文件不存在或无效则返回 null。
   static Future<String?> ensureModelAvailable() async {
-    if (_cachedModelPath != null) {
-      final f = File(_cachedModelPath!);
-      if (await f.exists() && await f.length() > _validModelMinSize) {
-        return _cachedModelPath!;
-      }
-      _cachedModelPath = null;
-    }
-
     final dir = await getApplicationSupportDirectory();
-    final targetPath = path.join(dir.path, modelFileName);
-    final targetFile = File(targetPath);
-
-    if (await targetFile.exists()) {
-      final size = await targetFile.length();
-      if (size > _validModelMinSize) {
-        _cachedModelPath = targetPath;
-        return targetPath;
-      }
-      // 文件不完整，删除
-      await targetFile.delete();
-    }
-
-    return null;
+    final target = File(path.join(dir.path, modelFileName));
+    return await target.exists() && await target.length() > 0
+        ? target.path
+        : null;
   }
 
   /// 当前选中的模型变体
@@ -252,14 +228,9 @@ class ColorizationModelManager {
 
       Exception? lastError;
       // deoldify 用用户可编辑的镜像列表；int8 用内置镜像
-      final urls =
-          variant == 'deoldify-int8'
-              ? _urlsForVariant(variant)
-              : await getModelUrls();
-      final minSize =
-          variant == 'deoldify-int8'
-              ? _validModelMinSize
-              : expectedFileSize ~/ 2;
+      final urls = variant == 'deoldify-int8'
+          ? _urlsForVariant(variant)
+          : await getModelUrls();
 
       for (int i = 0; i < urls.length; i++) {
         final url = urls[i];
@@ -270,10 +241,14 @@ class ColorizationModelManager {
             onProgress?.call(_downloadProgress);
           });
           final downloaded = await File(tempPath).length();
-          if (downloaded > minSize) {
-            await File(tempPath).rename(targetPath);
-            _cachedModelPath = targetPath;
+          if (downloaded > 0) {
+            await ImageAiService.instance.installStagedModel(
+              tempPath,
+              targetPath,
+              'deoldify',
+            );
             _customModelActive = false;
+            _customModelName = null;
             final prefs = await SharedPreferences.getInstance();
             await prefs.setBool(_customModelActiveKey, false);
             await prefs.remove(_customModelNameKey);
@@ -328,6 +303,7 @@ class ColorizationModelManager {
         throw Exception('HTTP ${response.statusCode}');
       }
 
+      if (response.statusCode == HttpStatus.ok) startByte = 0;
       final contentLength = response.contentLength;
       int received = startByte;
       final total = contentLength > 0 ? contentLength + startByte : 0;
@@ -336,32 +312,25 @@ class ColorizationModelManager {
         mode: startByte > 0 ? FileMode.append : FileMode.write,
       );
 
-      await for (final chunk in response) {
-        sink.add(chunk);
-        received += chunk.length;
-        onProgress(received, total);
-      }
+      await sink.addStream(
+        response.map((chunk) {
+          received += chunk.length;
+          onProgress(received, total);
+          return chunk;
+        }),
+      );
       await sink.close();
     } catch (e) {
-      sink?.close();
+      await sink?.close();
       rethrow;
     } finally {
       client.close();
     }
   }
 
-  /// 模型是否已下载且完整（含自选外部模型与已落盘到调用位置的任意变体）
-  static Future<bool> get isModelDownloaded async {
-    final dir = await getApplicationSupportDirectory();
-    final targetPath = path.join(dir.path, modelFileName);
-    final targetFile = File(targetPath);
-    if (await targetFile.exists()) {
-      final size = await targetFile.length();
-      if (size > _validModelMinSize) return true;
-    }
-    if (_cachedModelPath != null) return true;
-    return false;
-  }
+  /// Whether a model file is installed; readiness requires native validation.
+  static Future<bool> get isModelDownloaded async =>
+      await ensureModelAvailable() != null;
 
   /// 获取已下载模型大小（字节）
   static Future<int> getDownloadedSize() async {
@@ -383,6 +352,7 @@ class ColorizationModelManager {
 
   /// 清除模型文件（含自选外部模型备份）
   static Future<void> clearModel() async {
+    await ImageAiService.instance.resetSession();
     final dir = await getApplicationSupportDirectory();
     final targetPath = path.join(dir.path, modelFileName);
     final tempPath = '$targetPath.tmp';
@@ -399,8 +369,8 @@ class ColorizationModelManager {
     if (await bakFile.exists()) {
       await bakFile.delete();
     }
-    _cachedModelPath = null;
     _customModelActive = false;
+    _customModelName = null;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_customModelActiveKey, false);
     await prefs.remove(_customModelNameKey);

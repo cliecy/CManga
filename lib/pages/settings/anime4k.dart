@@ -4,8 +4,8 @@ part of 'settings_page.dart';
 ///
 /// 同时管理两个引擎版本：
 ///  - v1：纯 Dart CPU 算法（Gauss/Unblur/GradientRefine），缩放 1–4x，无模型文件；
-///  - v4：Anime4K v4 超分 ONNX 模型（默认官方 ACNet 2×，可选 Real-ESRGAN 4× / 通用 2×），经原生
-///    ONNX Runtime + NNAPI(GPU) 超分，倍数/通道数由模型实际维度决定（getModelInfo 探测），仅 Android 生效。
+///  - v4：ACNet / Real-ESRGAN ONNX 模型，Android 与 Windows 原生推理。
+///    模型倍率、最终输出倍率、增强强度和输出对比度分别控制。
 ///
 /// 两版本并存，由 `anime4KVersion` 设置选择；v4 选中时显示模型管理卡片，并隐藏 v1 专用滑块。
 class Anime4KSettings extends StatefulWidget {
@@ -51,9 +51,7 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
     if (_version == v) return;
     appdata.settings['anime4KVersion'] = v;
     appdata.saveData();
-    // 切换引擎后强制刷新图片（v1/v4 输出不同，缓存不可复用）
-    PaintingBinding.instance.imageCache.clear();
-    ComicImage.clear();
+    _refreshAiImages();
     setState(() {});
   }
 
@@ -61,8 +59,7 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
   Future<void> _selectModel(String id) async {
     if (Anime4KV4ModelManager.selectedDef.id == id) return;
     await Anime4KV4Service.instance.setModel(id);
-    PaintingBinding.instance.imageCache.clear();
-    ComicImage.clear();
+    _refreshAiImages();
     await _refreshModelStatus();
     if (mounted) setState(() {});
   }
@@ -106,6 +103,7 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
       await Anime4KV4Service.instance.resetNativeSession();
       await Anime4KV4Service.instance.checkModelAvailable();
       await _refreshModelStatus();
+      _refreshAiImages();
       if (mounted) {
         setState(() {
           _status = _isModelDownloaded ? 'Ready' : '';
@@ -121,6 +119,7 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
     await Anime4KV4Service.instance.resetNativeSession();
     await Anime4KV4Service.instance.checkModelAvailable();
     await _refreshModelStatus();
+    _refreshAiImages();
     if (mounted) {
       context.showMessage(message: "Model deleted".tl);
       setState(() {
@@ -135,55 +134,34 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
     try {
       final xFile = await file_selector.openFile(
         acceptedTypeGroups: <file_selector.XTypeGroup>[
-          file_selector.XTypeGroup(
-            label: 'ONNX Model',
-            extensions: ['onnx'],
-          ),
+          file_selector.XTypeGroup(label: 'ONNX Model', extensions: ['onnx']),
         ],
       );
       if (xFile == null) return;
       if (!xFile.name.toLowerCase().endsWith('.onnx')) {
-        if (mounted) context.showMessage(message: "Please select a .onnx file".tl);
+        if (mounted) {
+          context.showMessage(message: "Please select a .onnx file".tl);
+        }
         return;
       }
-      // 通过原生 ContentResolver 以 64KB 分块拷贝（不占内存、不拷坏），
-      // 直接落到当前选中模型的调用位置（fileName）。
-      final uri = xFile.path; // content URI 或真实文件路径
       final dir = await getApplicationSupportDirectory();
-      final targetPath = path.join(dir.path, Anime4KV4ModelManager.modelFileName);
-      final bakPath = '$targetPath.bak';
-      final tempPath = '$targetPath.tmp';
-
-      // 已存在下载模型则先备份，便于“回退内置模型”还原
-      final targetFile = File(targetPath);
-      if (await targetFile.exists()) {
-        await targetFile.rename(bakPath);
-      }
-
-      int written;
-      try {
-        written = await Anime4KV4ModelManager.copyUriTo(uri, tempPath);
-      } catch (e) {
-        if (await File(bakPath).exists()) await File(bakPath).rename(targetPath);
-        if (mounted) context.showMessage(message: "Failed to copy file: $e".tl);
-        return;
-      }
-
-      if (written < Anime4KV4ModelManager.validModelMinSize) {
-        await File(tempPath).delete().catchError((_) {});
-        if (await File(bakPath).exists()) await File(bakPath).rename(targetPath);
-        if (mounted) context.showMessage(message: "File too small, invalid model".tl);
-        return;
-      }
-
-      await File(tempPath).rename(targetPath);
-      await File(bakPath).delete().catchError((_) {});
+      final targetPath = path.join(
+        dir.path,
+        Anime4KV4ModelManager.modelFileName,
+      );
+      await ImageAiService.instance.installModelFile(
+        xFile.path,
+        targetPath,
+        'esrgan',
+        preserveBackup: true,
+      );
 
       // 记账为自选模型 + 失效原生会话缓存 + 让服务立即感知新路径
       await Anime4KV4ModelManager.markCustomModelActive(xFile.name);
       await Anime4KV4Service.instance.resetNativeSession();
       await Anime4KV4Service.instance.checkModelAvailable();
       await _refreshModelStatus();
+      _refreshAiImages();
       if (mounted) context.showMessage(message: "Custom model selected".tl);
     } catch (e) {
       if (mounted) context.showMessage(message: "Failed to pick file: $e".tl);
@@ -196,6 +174,7 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
     await Anime4KV4Service.instance.resetNativeSession();
     await Anime4KV4Service.instance.checkModelAvailable();
     await _refreshModelStatus();
+    _refreshAiImages();
     if (mounted) context.showMessage(message: "Reverted to built-in model".tl);
   }
 
@@ -229,13 +208,17 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
         _SwitchSetting(
           title: "Enable Anime4K Upscaling".tl,
           settingKey: "enableAnime4K",
+          onChanged: _refreshAiImages,
           beforeChange: (newValue) async {
             // 关闭或 v1 直接放行
             if (!newValue) return true;
             if (_version != 'v4') return true;
+            if (!await _allowImageAi(context)) return false;
             // v4 开启前必须确保模型已下载
             final downloaded = await Anime4KV4ModelManager.isModelDownloaded;
-            if (downloaded) return true;
+            if (downloaded) {
+              return Anime4KV4Service.instance.checkModelAvailable();
+            }
             if (!mounted) return false;
             final confirm = await showDialog<bool>(
               context: context,
@@ -261,7 +244,8 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
             );
             if (confirm == true) {
               await _downloadModel();
-              if (mounted && await Anime4KV4ModelManager.isModelDownloaded) {
+              if (mounted &&
+                  await Anime4KV4Service.instance.checkModelAvailable()) {
                 appdata.settings['enableAnime4K'] = true;
                 appdata.saveData();
                 PaintingBinding.instance.imageCache.clear();
@@ -298,9 +282,13 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
                   onSelected: (_) => _setVersion('v1'),
                 ),
                 ChoiceChip(
-                  label: Text("v4 (AI · GPU)".tl),
+                  label: Text("v4 (AI)".tl),
                   selected: isV4,
-                  onSelected: (_) => _setVersion('v4'),
+                  onSelected: (_) async {
+                    if (await _allowImageAi(context) && mounted) {
+                      _setVersion('v4');
+                    }
+                  },
                 ),
               ],
             ),
@@ -330,18 +318,13 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
           child: Column(
             children: [
               _SliderSetting(
-                title: "Scale Factor".tl,
-                settingsIndex: "anime4KScaleFactor",
-                min: 1.0,
-                max: 4.0,
-                interval: 0.5,
-              ),
-              _SliderSetting(
                 title: "Push Strength".tl,
                 settingsIndex: "anime4KPushStrength",
                 min: 0.0,
                 max: 1.0,
                 interval: 0.05,
+                preciseInput: true,
+                onChanged: _refreshAiImages,
               ),
               _SliderSetting(
                 title: "Gradient Refine Strength".tl,
@@ -349,29 +332,25 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
                 min: 0.0,
                 max: 1.0,
                 interval: 0.05,
+                preciseInput: true,
+                onChanged: _refreshAiImages,
               ),
             ],
           ),
         ),
-        // v4 强度（倍数由模型决定，仅调节强度）
-        SliverAnimatedVisibility(
-          visible: isV4,
-          child: _SliderSetting(
-            title:
-                "Upscale Intensity (v4 · ${Anime4KV4ModelManager.selectedDef.scale}x)"
-                    .tl,
-            settingsIndex: "anime4KV4Intensity",
-            min: 0.3,
-            max: 1.2,
-            interval: 0.05,
+        _ImageAiControls(
+          key: ValueKey(
+            '${Anime4KV4ModelManager.selectedDef.id}@$_customModelName',
           ),
-        ),
+          superResolution: true,
+        ).toSliver(),
         ListTile(
           title: Text("Clear Anime4K Cache".tl),
           trailing: const Icon(Icons.delete_sweep),
           onTap: () async {
             await Anime4KService.instance.clearCache();
             if (isV4) await Anime4KV4Service.instance.clearCache();
+            _refreshAiImages();
             if (mounted) {
               context.showMessage(message: "Anime4K cache cleared".tl);
             }
@@ -408,7 +387,7 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
                       _isModelDownloaded
                           ? "Model downloaded".tl
                           : "Model not downloaded (~${Anime4KV4ModelManager.selectedDef.sizeHintMB}MB)"
-                              .tl,
+                                .tl,
                       style: TextStyle(
                         color: context.colorScheme.onSurfaceVariant,
                         fontSize: 12,
@@ -435,8 +414,9 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
                           if (!_isModelDownloaded)
                             Expanded(
                               child: ElevatedButton.icon(
-                                onPressed:
-                                    _isDownloading ? null : _downloadModel,
+                                onPressed: _isDownloading
+                                    ? null
+                                    : _downloadModel,
                                 icon: _isDownloading
                                     ? const SizedBox(
                                         width: 16,
@@ -487,7 +467,7 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
                       _usingCustom
                           ? "Using: ${_customModelName ?? 'custom model'}".tl
                           : "Select a local .onnx model to override the built-in one"
-                              .tl,
+                                .tl,
                       style: TextStyle(
                         color: context.colorScheme.onSurfaceVariant,
                         fontSize: 12,
@@ -534,12 +514,12 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
             ),
           ),
           ..._modelUrls.asMap().entries.map(
-                (e) => _MirrorUrlTile(
-                  index: e.key,
-                  url: e.value,
-                  onDelete: _removeMirrorUrl,
-                ),
-              ),
+            (e) => _MirrorUrlTile(
+              index: e.key,
+              url: e.value,
+              onDelete: _removeMirrorUrl,
+            ),
+          ),
           SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -572,4 +552,3 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
     );
   }
 }
-

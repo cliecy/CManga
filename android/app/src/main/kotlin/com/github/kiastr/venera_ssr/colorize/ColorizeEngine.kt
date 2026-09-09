@@ -1,734 +1,426 @@
 package com.github.kiastr.venera_ssr.colorize
 
+import ai.onnxruntime.OnnxJavaType
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
+import ai.onnxruntime.TensorInfo
 import android.graphics.Bitmap
 import org.opencv.core.Core
 import org.opencv.core.CvType
 import org.opencv.core.Mat
-import org.opencv.core.MatOfDouble
 import org.opencv.core.Rect
-import org.opencv.core.Scalar
 import org.opencv.core.Size
 import org.opencv.imgproc.Imgproc
-import java.util.Collections
-import kotlin.math.roundToLong
+import java.io.Closeable
+import java.io.File
+import java.nio.FloatBuffer
+import java.security.MessageDigest
+import kotlin.math.roundToInt
 
-/**
- * 上色/超分计算核心。三个函数严格对齐参考实现：
- *  - DeOldify 输入值域 0–255（不归一化），输出完整 BGR
- *  - DDColor  输入值域 0–1（/255），输出仅 ab 两通道，需与原图 L 拼接
- *  - ESRGAN   输入值域 0–1（/255），输出完整 RGB [1,3,scale·H,scale·W]；scale 由模型实际维度推导（见 getModelInfo）
- *  - ACNet    官方 Anime4K v4：1 通道 Y 亮度 [1,1,H,W] -> [1,1,2H,2W]，走 YCrCb 管线（见 colorizeAcnet）
- *             两者均模型无关（按输入通道数自动路由），换权重无需改原生
- *  - OpenCV float-LAB 真实范围 L∈[0,100]、a,b∈[−128,127]，必须用 OpenCV 转换
- *
- * 移植自 AiColorize（com.kiastr.aicolorize.ColorizeEngine），经真机模型端到端验证。
- */
-class ColorizeEngine {
+/** Serial native inference, bounded unrendered results, and independent render controls. */
+class ColorizeEngine(profileDirectory: File) {
+    private val env = OrtEnvironment.getEnvironment()
+    private val models = ModelManager(env, profileDirectory)
 
-    companion object {
-        // NNAPI 输出与 CPU 参考逐通道 MAE 阈值（[0,1] 空间）；超过即判定偏色，整图回退 CPU。
-        // NNAPI 在部分设备上仅做 fp16 近似，正常数值误差远小于此；真偏色（通道错位/染色）通常在 0.1+。
-        private const val NNAPI_COLOR_TOL = 0.04
-        // 整图通道均值偏色阈值（uint8 空间 [0,255]）。仅 NNAPI 路径、全图推理完成后做一次：
-        // 真偏色表现为 R 通道独高、G≈B，R-G 均值远超正常图（正常动漫各色平均后 R≈G≈B，典型 < 20）；
-        // 实测染红设备 R-G 均值常 > 60，留足余量取 30。首 tile 的 MAE 检查会被顶部黑边蒙混
-        // （NNAPI 对全黑输入也输出近乎全黑，MAE≈0），故以全图均值作兜底。
-        private const val NNAPI_COLOR_TOL_RGB = 30.0
+    data class ModelInfo(val channels: Int, val scale: Int, val inputWidth: Int, val inputHeight: Int) {
+        fun toMap(): Map<String, Int> = mapOf(
+            "channels" to channels, "scale" to scale,
+            "inputWidth" to inputWidth, "inputHeight" to inputHeight
+        )
     }
 
-    private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
-    private val modelManager = ModelManager(env)
+    data class Output(val bitmap: Bitmap, val backend: String, val scale: Int,
+                      val cacheHit: Boolean, val fallbackReason: String?)
+    private data class ModelKey(val path: String, val identity: String, val type: String)
+    private data class CacheKey(val model: ModelKey, val input: String, val backend: String)
+    private data class Base(val pixels: Mat, val backend: String, val reason: String?) {
+        val bytes: Long get() = pixels.total() * pixels.elemSize()
+    }
+    private val metadata = LinkedHashMap<ModelKey, ModelInfo>()
+    private val cache = LinkedHashMap<CacheKey, Base>(8, 0.75f, true)
+    private var cacheBytes = 0L
 
-    /**
-     * 单次处理：输入已解码的 Bitmap，返回处理后的 Bitmap。
-     * 不负责输入 Bitmap 的回收（由调用方持有），仅回收内部 Mat 与输出 Bitmap 之外的中间对象。
-     */
-    fun colorize(
-        inputBitmap: Bitmap,
-        modelPath: String,
-        type: String,
-        useNnapi: Boolean,
-        intensity: Float
-    ): Bitmap {
-        // Utils.bitmapToMat 要求 ARGB_8888；非该配置会产出异常/空 Mat（曾导致 resize 空源崩溃）
-        val (working, needsRecycle) = if (inputBitmap.config == Bitmap.Config.ARGB_8888) {
-            Pair(inputBitmap, false)
-        } else {
-            Pair(inputBitmap.copy(Bitmap.Config.ARGB_8888, false), true)
-        }
-        if (working.width <= 0 || working.height <= 0) {
-            if (needsRecycle) working.recycle()
-            throw IllegalArgumentException("图片尺寸无效: ${working.width}x${working.height}")
-        }
-        val session = modelManager.getSession(modelPath, useNnapi)
-        val out = when (type) {
-            "ddcolor" -> colorizeDdcolor(working, session, intensity)
-            "esrgan" -> colorizeEsrgan(working, session, modelPath, useNnapi, intensity)
-            else -> colorizeDeoldify(working, session, intensity)
-        }
-        if (needsRecycle) working.recycle()
-        return out
+    private class Mats : Closeable {
+        private val values = ArrayList<Mat>()
+        fun own(value: Mat): Mat { values.add(value); return value }
+        fun create(): Mat = own(Mat())
+        fun keep(value: Mat): Mat { values.remove(value); return value }
+        override fun close() { values.asReversed().forEach { it.release() } }
     }
 
-    // ----------------------------------------------------------------
-    // DeOldify：输入 0–255，输出完整 BGR，再与原图 L 通道在 LAB 合并
-    // 对应 colorize_deoldify（py_ref_impl.colorize_deoldify）
-    // ----------------------------------------------------------------
-    private fun colorizeDeoldify(inputBitmap: Bitmap, session: OrtSession, intensity: Float): Bitmap {
-        val originalBgr = ImageUtils.bitmapToBgrMat(inputBitmap) // (H,W,3) BGR uint8
-        val h = originalBgr.height()
-        val w = originalBgr.width()
-
-        // target_l = 原图 BGR 的 B 通道（cv2.split 第一个）
-        val targetL = Mat()
-        Core.extractChannel(originalBgr, targetL, 0)
-
-        // gray = BGR2GRAY
-        val gray = Mat()
-        Imgproc.cvtColor(originalBgr, gray, Imgproc.COLOR_BGR2GRAY)
-        // gray_rgb = GRAY2RGB
-        val grayRgb = Mat()
-        Imgproc.cvtColor(gray, grayRgb, Imgproc.COLOR_GRAY2RGB)
-        // resize(256,256)
-        val input256 = Mat()
-        Imgproc.resize(grayRgb, input256, Size(256.0, 256.0))
-        // -> float32 0–255（不 /255！）
-        val inputF = Mat()
-        input256.convertTo(inputF, CvType.CV_32F)
-
-        // NCHW [1,3,256,256] 0–255
-        val buf = ImageUtils.hwcToNchwFloatBuffer(inputF)
-        val inputName = session.inputNames.iterator().next()
-        val tensor = OnnxTensor.createTensor(env, buf, longArrayOf(1, 3, 256, 256))
-        val results = session.run(Collections.singletonMap(inputName, tensor))
-        // Result.get(String) 返回 Optional<OnnxValue>（直接转型 OnnxTensor 会 ClassCastException），
-        // 改用 get(int) 直接取 OnnxValue
-        val outBuf = (results.get(0) as OnnxTensor).floatBuffer // (1,3,256,256) NCHW BGR 0–255
-        val colorized256 = ImageUtils.nchwToHwcMat(outBuf, 3, 256, 256) // (256,256,3) BGR
-        tensor.close()
-        results.close()
-
-        // BGR2RGB -> uint8
-        val colorizedRgb = Mat()
-        Imgproc.cvtColor(colorized256, colorizedRgb, Imgproc.COLOR_BGR2RGB)
-        colorized256.release()
-        val colorizedUint8 = Mat()
-        colorizedRgb.convertTo(colorizedUint8, CvType.CV_8U) // 饱和截断
-        colorizedRgb.release()
-
-        // resize 回原尺寸
-        val colorizedFull = Mat()
-        Imgproc.resize(colorizedUint8, colorizedFull, Size(w.toDouble(), h.toDouble()))
-        colorizedUint8.release()
-
-        // GaussianBlur(13,13)
-        val blurred = Mat()
-        Imgproc.GaussianBlur(colorizedFull, blurred, Size(13.0, 13.0), 0.0)
-        colorizedFull.release()
-
-        // ★ 刻意对齐原版：colorized 此时是 RGB，但原代码用 COLOR_BGR2LAB 处理（即把 RGB 当 BGR）
-        val lab = Mat()
-        Imgproc.cvtColor(blurred, lab, Imgproc.COLOR_BGR2Lab)
-        blurred.release()
-
-        val channels = ArrayList<Mat>()
-        Core.split(lab, channels)
-        var a = channels[1]
-        var b = channels[2]
-
-        // intensity：在 A/B 通道上围绕中性灰 128 做缩放（默认 1.0 = 不变），保留 L 不变。
-        // 在 float 空间计算后截断回 uint8，避免 uint8 直接运算的饱和误差。
-        if (intensity != 1.0f) {
-            val aF = Mat()
-            val bF = Mat()
-            a.convertTo(aF, CvType.CV_32F)
-            b.convertTo(bF, CvType.CV_32F)
-            Core.subtract(aF, Scalar(128.0), aF)
-            Core.multiply(aF, Scalar(intensity.toDouble()), aF)
-            Core.add(aF, Scalar(128.0), aF)
-            aF.convertTo(a, CvType.CV_8U) // 写回 a（即 channels[1]）
-            Core.subtract(bF, Scalar(128.0), bF)
-            Core.multiply(bF, Scalar(intensity.toDouble()), bF)
-            Core.add(bF, Scalar(128.0), bF)
-            bF.convertTo(b, CvType.CV_8U) // 写回 b（即 channels[2]）
-            aF.release()
-            bF.release()
-        }
-
-        val merged = ArrayList<Mat>()
-        merged.add(targetL)
-        merged.add(a)
-        merged.add(b)
-        val resultLab = Mat()
-        Core.merge(merged, resultLab)
-        lab.release()
-        channels[0].release()
-        a.release()
-        b.release()
-
-        // LAB2BGR
-        val resultBgr = Mat()
-        Imgproc.cvtColor(resultLab, resultBgr, Imgproc.COLOR_Lab2BGR)
-        resultLab.release()
-        targetL.release()
-
-        val outBitmap = ImageUtils.bgrMatToBitmap(resultBgr) // 内部 BGR2RGBA
-        resultBgr.release()
-        originalBgr.release()
-        gray.release()
-        grayRgb.release()
-        input256.release()
-        inputF.release()
-        return outBitmap
-    }
-
-    // ----------------------------------------------------------------
-    // DDColor：输入 0–1，输出仅 ab 两通道，需与原图 L 拼接
-    // 对应 colorize_ddcolor_tiny（py_ref_impl.colorize_ddcolor）
-    // ----------------------------------------------------------------
-    private fun colorizeDdcolor(inputBitmap: Bitmap, session: OrtSession, intensity: Float): Bitmap {
-        val bgr = ImageUtils.bitmapToBgrMat(inputBitmap) // BGR uint8
-        val h = bgr.height()
-        val w = bgr.width()
-
-        // img_norm = bgr / 255
-        val imgNorm = Mat()
-        bgr.convertTo(imgNorm, CvType.CV_32F, 1.0 / 255.0)
-
-        // orig_l = BGR2Lab[:,:,:1]（float LAB, L∈[0,100]）
-        val labFull = Mat()
-        Imgproc.cvtColor(imgNorm, labFull, Imgproc.COLOR_BGR2Lab)
-        imgNorm.release()
-        val origL = Mat()
-        Core.extractChannel(labFull, origL, 0)
-        labFull.release()
-
-        // img_resized 256
-        val imgResized = Mat()
-        Imgproc.resize(imgNorm, imgResized, Size(256.0, 256.0))
-        // img_l from resized
-        val labResized = Mat()
-        Imgproc.cvtColor(imgResized, labResized, Imgproc.COLOR_BGR2Lab)
-        val imgL = Mat()
-        Core.extractChannel(labResized, imgL, 0)
-        labResized.release()
-        imgResized.release()
-
-        // gray_lab = concat(img_l, 0, 0)
-        val zeros = Mat(imgL.size(), imgL.type(), Scalar(0.0))
-        val grayLabList = ArrayList<Mat>()
-        grayLabList.add(imgL)
-        grayLabList.add(zeros)
-        grayLabList.add(zeros)
-        val grayLab = Mat()
-        Core.merge(grayLabList, grayLab)
-        // gray_rgb = LAB2RGB（0–1）
-        val grayRgb = Mat()
-        Imgproc.cvtColor(grayLab, grayRgb, Imgproc.COLOR_Lab2RGB)
-        zeros.release()
-
-        // NCHW [1,3,256,256] 0–1
-        val buf = ImageUtils.hwcToNchwFloatBuffer(grayRgb)
-        val inputName = session.inputNames.iterator().next()
-        val tensor = OnnxTensor.createTensor(env, buf, longArrayOf(1, 3, 256, 256))
-        val results = session.run(Collections.singletonMap(inputName, tensor))
-        // Result.get(String) 返回 Optional<OnnxValue>；改用 get(int)
-        val outBuf = (results.get(0) as OnnxTensor).floatBuffer // (1,2,256,256) NCHW ab
-        val ab256 = ImageUtils.nchwToHwcMat(outBuf, 2, 256, 256) // (256,256,2) ab
-        tensor.close()
-        results.close()
-
-        // resize ab 回原尺寸
-        val abFull = Mat()
-        Imgproc.resize(ab256, abFull, Size(w.toDouble(), h.toDouble()))
-        ab256.release()
-
-        // intensity：在 ab 通道上围绕 0 做缩放（默认 1.0 = 不变）
-        if (intensity != 1.0f) {
-            Core.multiply(abFull, Scalar(intensity.toDouble()), abFull)
-        }
-
-        // output_lab = concat(orig_l, abFull)
-        val outLabList = ArrayList<Mat>()
-        outLabList.add(origL)
-        outLabList.add(abFull)
-        val outLab = Mat()
-        Core.merge(outLabList, outLab)
-        origL.release()
-        abFull.release()
-
-        // output_bgr = LAB2BGR（float 0–1）
-        val outBgr = Mat()
-        Imgproc.cvtColor(outLab, outBgr, Imgproc.COLOR_Lab2BGR)
-        outLab.release()
-
-        // (outBgr * 255).round().clip(0,255).astype(uint8)
-        // OpenCV convertTo(CV_8U) 内部用 cvRound 四舍五入 + 饱和截断（已实证），
-        // 因此只需 *255 后直接 convertTo，切勿再 +0.5（会变成双重舍入、整体偏亮 ~1）
-        val scaled = Mat()
-        Core.multiply(outBgr, Scalar(255.0), scaled)
-        val outUint8 = Mat()
-        scaled.convertTo(outUint8, CvType.CV_8U) // cvRound + 饱和截断 = clip[0,255]
-        scaled.release()
-        outBgr.release()
-
-        val outBitmap = ImageUtils.bgrMatToBitmap(outUint8) // 内部 BGR2RGBA
-        outUint8.release()
-        bgr.release()
-        grayLab.release()
-        grayRgb.release()
-        imgL.release()
-        return outBitmap
-    }
-
-    // ----------------------------------------------------------------
-    // ESRGAN / ACNet：输入 0–1，放大倍数由模型实际维度推导（见 getModelInfo）。
-    //  - Real-ESRGAN：3 通道 RGB [1,3,H,W] -> [1,3,scale·H,scale·W]，全 RGB 管线；
-    //  - 官方 Anime4K v4 ACNet：1 通道 Y 亮度 [1,1,H,W] -> [1,1,2H,2W]，走 colorizeAcnet
-    //    （RGB -> YCrCb，Y 超分 + CbCr 双线性 -> 合并）。按输入通道数自动路由。
-    // 对应 realesrgan 官方推理（img/255 -> RGB -> NCHW -> 推理 -> NCHW -> *255）
-    //  - 不归一化到 ImageNet 均值（animevideov3 仅 /255）
-    //  - intensity 围绕中性灰 0.5 做对比缩放（默认 1.0 = 不变）
-    //
-    // 固定尺寸分块策略（NNAPI 友好）：
-    //  - 所有 tile（含边界残块）一律 padding 到恒定 TILE_IN×TILE_IN 再送入模型。
-    //    ONNX Runtime 的 NNAPI EP 在模型含动态维度时按首次实际形状编译计算图；
-    //    形状每变一次就重编译一次，是此前"大图极慢"的主因。输入形状恒定后
-    //    整个会话只编译一次，后续 tile 直接复用，可全程走 GPU/NPU。
-    //  - ART 堆峰值恒定 = 3*(4*TILE_IN)^2*4 字节 ≈ 28MB（与原图尺寸无关），
-    //    彻底消除此前按图尺寸增长导致的 OOM。
-    //  - 核心区在 tile 内恒定从 (PAD,PAD) 起，输出按 PAD*scale 中心裁剪，消除接缝。
-    //  - NNAPI 输出健全性自检：首个 tile 若"输入非黑、输出全黑"，判定后端异常，
-    //    自动整图切 CPU 重跑（CPU EP 对任意形状稳定正确）。
-    // ----------------------------------------------------------------
-    private fun colorizeEsrgan(
-        inputBitmap: Bitmap,
-        session: OrtSession,
-        modelPath: String,
-        useNnapi: Boolean,
-        intensity: Float
-    ): Bitmap {
-        // 先探测模型输入通道数：Real-ESRGAN 为 3(RGB)，官方 Anime4K v4 ACNet 为 1(Y 亮度)。
-        // 按通道路由到对应管线，模型无关——换权重无需改原生。
-        val cpuSession = modelManager.getSession(modelPath, false)
-        val info = getModelInfo(modelPath, cpuSession)
-        if (info.channels == 1) {
-            return colorizeAcnet(
-                inputBitmap, session, modelPath, useNnapi, intensity, info.scale
-            )
-        }
-
-        val bgr = ImageUtils.bitmapToBgrMat(inputBitmap) // (H,W,3) BGR uint8
-        val h = bgr.height()
-        val w = bgr.width()
-
-        // BGR -> RGB（模型以 RGB 训练）-> float32 [0,1]（animevideov3 仅 /255）
-        val rgb = Mat()
-        Imgproc.cvtColor(bgr, rgb, Imgproc.COLOR_BGR2RGB)
-        val rgbF = Mat()
-        rgb.convertTo(rgbF, CvType.CV_32F, 1.0 / 255.0)
-        bgr.release()
-        rgb.release()
-
-        try {
-            // 放大倍数从模型实际输入/输出维度推导（探测一次并缓存），不再硬编码——
-            // 换 2x/3x/4x 权重时自动适配，无需改代码。用 CPU 会话探测，与 NNAPI 是否偏色无关。
-            val scale = info.scale
-            if (!useNnapi) {
-                // CPU：输出恒正确，无需自检
-                val out = colorizeEsrganFixedTile(
-                    rgbF, h, w, session, intensity, scale, cpuRef = null, channels = 3
-                )!!
-                return rgbU8ToBitmap(out)
+    fun getModelInfo(path: String, type: String): ModelInfo {
+        val file = File(path)
+        require(file.isFile) { "Model file does not exist: $path" }
+        // Match Dart's content identity, so a validated dynamic model is not probed
+        // again on the first render (including zero-strength/zero-intensity renders).
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                digest.update(buffer, 0, count)
             }
-            // NNAPI：首 tile 与 CPU 参考对比，拦截后端返回的错误颜色（典型如整体偏红）。
-            // 旧逻辑只检测"全黑"，漏掉了"偏色但仍非黑"的损坏——某些设备的 NNAPI
-            // 会把 Real-ESRGAN 输出染红而非归零，表现就是超分后发红。
-            val out = colorizeEsrganFixedTile(
-                rgbF, h, w, session, intensity, scale, cpuRef = cpuSession, channels = 3
-            )
-            if (out != null) return rgbU8ToBitmap(out)
-
-            // NNAPI 不可信 -> 整图切 CPU 重跑
-            val outCpu = colorizeEsrganFixedTile(
-                rgbF, h, w, cpuSession, intensity, scale, cpuRef = null, channels = 3
-            )!!
-            return rgbU8ToBitmap(outCpu)
-        } finally {
-            rgbF.release()
         }
-    }
-
-    /** uint8 RGB [H,W,3] -> Bitmap（RGB -> BGR，bgrMatToBitmap 内部再做 BGR2RGBA） */
-    private fun rgbU8ToBitmap(outRgbU8: Mat): Bitmap {
-        val outBgr = Mat()
-        Imgproc.cvtColor(outRgbU8, outBgr, Imgproc.COLOR_RGB2BGR)
-        outRgbU8.release()
-        val bmp = ImageUtils.bgrMatToBitmap(outBgr)
-        outBgr.release()
-        return bmp
-    }
-
-    /**
-     * 官方 Anime4K v4 ACNet 管线：模型只吃 1 通道 Y（亮度），色度通道双线性放大。
-     * RGB -> YCrCb -> Y 用 ACNet 超分 + Cr/Cb 双线性 2x -> 合并回 YCrCb -> BGR。
-     * 与 Anime4KCPP 官方 Android 集成一致（ACNet 即为此设计的 luma 超分器）。
-     */
-    private fun colorizeAcnet(
-        inputBitmap: Bitmap,
-        session: OrtSession,
-        modelPath: String,
-        useNnapi: Boolean,
-        intensity: Float,
-        scale: Int
-    ): Bitmap {
-        val bgr = ImageUtils.bitmapToBgrMat(inputBitmap)
-        val h = bgr.height()
-        val w = bgr.width()
-
-        val ycrcb = Mat()
-        Imgproc.cvtColor(bgr, ycrcb, Imgproc.COLOR_BGR2YCrCb)
-        val planes = ArrayList<Mat>(3)
-        Core.split(ycrcb, planes) // [Y, Cr, Cb]，Y 为亮度 uint8
-        bgr.release()
-        ycrcb.release()
-        val y = planes[0]
-        val cr = planes[1]
-        val cb = planes[2]
-
-        // Y -> float32 [0,1]
-        val yF = Mat()
-        y.convertTo(yF, CvType.CV_32F, 1.0 / 255.0)
-        y.release()
-
-        try {
-            val cpuSession = modelManager.getSession(modelPath, false)
-            val outY = if (!useNnapi) {
-                colorizeEsrganFixedTile(
-                    yF, h, w, session, intensity, scale, cpuRef = null, channels = 1
-                )!!
-            } else {
-                colorizeEsrganFixedTile(
-                    yF, h, w, session, intensity, scale, cpuRef = cpuSession, channels = 1
-                ) ?: colorizeEsrganFixedTile(
-                    yF, h, w, cpuSession, intensity, scale, cpuRef = null, channels = 1
-                )!!
+        val digits = "0123456789abcdef"
+        val identity = buildString(64) {
+            for (byte in digest.digest()) {
+                val value = byte.toInt() and 255
+                append(digits[value ushr 4]); append(digits[value and 15])
             }
-
-            // 色度双线性放大（保持 uint8，与 Y 输出合并）
-            val outW = w * scale
-            val outH = h * scale
-            val size = Size(outW.toDouble(), outH.toDouble())
-            val crUp = Mat()
-            Imgproc.resize(cr, crUp, size, 0.0, 0.0, Imgproc.INTER_LINEAR)
-            val cbUp = Mat()
-            Imgproc.resize(cb, cbUp, size, 0.0, 0.0, Imgproc.INTER_LINEAR)
-            cr.release()
-            cb.release()
-
-            // 合并 [Y_up, Cr_up, Cb_up] -> YCrCb -> BGR
-            val outYcrcb = Mat()
-            Core.merge(listOf(outY, crUp, cbUp), outYcrcb)
-            val outBgr = Mat()
-            Imgproc.cvtColor(outYcrcb, outBgr, Imgproc.COLOR_YCrCb2BGR)
-            outYcrcb.release()
-            val bmp = ImageUtils.bgrMatToBitmap(outBgr)
-            outBgr.release()
-            outY.release()
-            crUp.release()
-            cbUp.release()
-            return bmp
-        } finally {
-            yF.release()
         }
+        return inspect(ModelKey(path, identity, type))
     }
 
-    /**
-     * 固定尺寸分块推理（模型无关，按 channels 区分 3 通道 RGB 与 1 通道 Y）。
-     * 返回 uint8 输出 Mat（3 通道 RGB 或 1 通道 Y），由调用方做颜色空间转换。
-     * 返回 null 表示 NNAPI 首 tile 自检未过（全黑或偏色，后端不可信），由调用方回退 CPU。
-     * cpuRef 非空时开启自检；为 null 时（CPU 路径或回退重跑）不做自检。
-     */
-    private fun colorizeEsrganFixedTile(
-        inputF: Mat, h: Int, w: Int,
-        session: OrtSession, intensity: Float, scale: Int, cpuRef: OrtSession?,
-        channels: Int
-    ): Mat? {
-        val outH = h * scale
-        val outW = w * scale
-
-        // 固定输入边长。384 兼顾单 tile 计算量与 ART 堆峰值（输出 1536² ≈ 28MB）
-        val tileIn = 384
-        val pad = 16                    // 每边重叠感受野，裁剪后消除接缝
-        val core = tileIn - 2 * pad     // 每个 tile 实际贡献的有效边长 = 352
-
-        // 全图 uint8 输出（native 内存，不占 ART 堆）
-        val outU8 = Mat.zeros(outH, outW, CvType.CV_8UC(channels))
-        val inputName = session.inputNames.iterator().next()
-        var selfChecked = false
-
-        var y = 0
-        while (y < h) {
-            val coreH = minOf(core, h - y)
-            var x = 0
-            while (x < w) {
-                val coreW = minOf(core, w - x)
-
-                // 源区域（核心区 + 四周 pad），clamp 到图像内
-                val sx0 = maxOf(0, x - pad)
-                val sy0 = maxOf(0, y - pad)
-                val sx1 = minOf(w, x + coreW + pad)
-                val sy1 = minOf(h, y + coreH + pad)
-
-                // 补齐到恒定 tileIn×tileIn：越界侧与右/下不足部分用边缘复制填充
-                // （BORDER_REPLICATE 对任意 border 大小安全；BORDER_REFLECT 在
-                //  border >= 源边长时行为受限，小图会出问题）
-                val padLeft = maxOf(0, pad - x)
-                val padTop = maxOf(0, pad - y)
-                val padRight = tileIn - padLeft - (sx1 - sx0)
-                val padBottom = tileIn - padTop - (sy1 - sy0)
-
-                val src = Mat(inputF, Rect(sx0, sy0, sx1 - sx0, sy1 - sy0))
-                val tile = Mat()
-                Core.copyMakeBorder(
-                    src, tile, padTop, padBottom, padLeft, padRight, Core.BORDER_REPLICATE
-                )
-                src.release()
-
-                // 推理：tile (tileIn,tileIn,channels) float[0,1] -> (1,channels,scale*tileIn,scale*tileIn) NCHW
-                val buf = ImageUtils.hwcToNchwFloatBuffer(tile)
-                val tensor = OnnxTensor.createTensor(
-                    env, buf, longArrayOf(1L, channels.toLong(), tileIn.toLong(), tileIn.toLong())
-                )
-                val results = session.run(Collections.singletonMap(inputName, tensor))
-                val outBuf = (results.get(0) as OnnxTensor).floatBuffer
-                val outTile = ImageUtils.nchwToHwcMat(outBuf, channels, tileIn * scale, tileIn * scale)
-                tensor.close()
-                results.close()
-
-                // 后端健全性自检（仅 NNAPI，cpuRef 即 CPU 参考会话）
-                // 关键修正：旧逻辑只在“首个 tile”比对，而阅读器首 tile 常是黑边，
-                // NNAPI 对全黑输入也输出近黑，MAE≈0，自检被蒙混通过。改为在“首个含内容
-                // tile”上比对，且偏色比对排除近白像素（白底被 clip 在 1.0 看不出红偏，
-                // 暗部/墨线最明显），彻底消除白底稀释导致的漏检。
-                if (cpuRef != null && !selfChecked) {
-                    // 该 tile 是否含内容（各通道标准差之和 > 阈值，排除纯黑/纯白边框）
-                    val std = MatOfDouble(); val meanTmp = MatOfDouble()
-                    Core.meanStdDev(tile, meanTmp, std)
-                    var sumStd = 0.0
-                    for (i in 0 until std.rows()) for (j in 0 until std.cols()) sumStd += std.get(i, j)[0]
-                    val hasContent = sumStd > 0.02
-                    if (hasContent) {
-                        val inMean = Core.mean(tile).`val`
-                        val outMean = Core.mean(outTile).`val`
-                        var inSum = 0.0; var outSum = 0.0
-                        for (i in 0 until channels) { inSum += inMean[i]; outSum += outMean[i] }
-                        // 1) 全黑：输入非黑但输出全黑 => 后端异常（原自检逻辑保留）
-                        if (inSum / channels > 0.05 && outSum / channels < 0.01) {
-                            outTile.release()
-                            tile.release()
-                            outU8.release()
-                            return null
+    private fun inspect(key: ModelKey): ModelInfo {
+        require(key.type == "esrgan" || key.type == "deoldify") { "Unsupported model type: ${key.type}" }
+        metadata[key]?.let { return it }
+        val session = models.getSession(key.path, key.identity, false).ort
+        require(session.numInputs == 1L && session.numOutputs == 1L) {
+            "Expected one image input and one image output"
+        }
+        val input = session.inputInfo.values.first().info as? TensorInfo
+            ?: throw IllegalArgumentException("Model input must be a tensor")
+        val output = session.outputInfo.values.first().info as? TensorInfo
+            ?: throw IllegalArgumentException("Model output must be a tensor")
+        val shape = input.shape
+        val outShape = output.shape
+        require(input.type == OnnxJavaType.FLOAT && output.type == OnnxJavaType.FLOAT &&
+            shape.size == 4 && outShape.size == 4 && (shape[0] == 1L || shape[0] < 0) &&
+            (outShape[0] == 1L || outShape[0] < 0)) { "Expected float32 NCHW image tensors" }
+        val channels = shape[1].toInt()
+        require(channels == 1 || channels == 3) { "Only 1-channel ACNet or 3-channel RGB models are supported" }
+        require(outShape[1] == channels.toLong() || (key.type == "deoldify" && outShape[1] < 0)) {
+            "Input/output channel counts must match"
+        }
+        val width = if (shape[3] > 0) shape[3].toInt() else 0
+        val height = if (shape[2] > 0) shape[2].toInt() else 0
+        require(width in 0..2048 && height in 0..2048) { "Model input dimensions exceed the supported memory limit" }
+        val scale: Int
+        if (key.type == "deoldify") {
+            require(channels == 3 && (width == 0 || width == 256) && (height == 0 || height == 256) &&
+                (outShape[2] < 0 || outShape[2] == 256L) && (outShape[3] < 0 || outShape[3] == 256L)) {
+                "DeOldify requires float32 NCHW RGB with 256x256 or dynamic spatial dimensions"
+            }
+            if (shape.any { it < 0 } || outShape.any { it < 0 }) {
+                // Dynamic artistic/int8 exports retain the established 256-pixel preprocessing contract.
+                OnnxTensor.createTensor(env, FloatBuffer.allocate(3 * 256 * 256),
+                    longArrayOf(1, 3, 256, 256)).use { tensor ->
+                    session.run(mapOf(session.inputNames.first() to tensor)).use { results ->
+                        val actual = (results[0] as? OnnxTensor)?.info
+                        require(actual?.type == OnnxJavaType.FLOAT &&
+                            actual.shape.contentEquals(longArrayOf(1, 3, 256, 256))) {
+                            "DeOldify must produce float32 [1,3,256,256] for its normalized input"
                         }
-                        // 2) 偏色/失真：与 CPU 参考 tile 在“非近白像素”上比对，逐通道 MAE 超阈值即
-                        //    判定后端返回了错误颜色（典型如整体偏红）。NNAPI 在部分设备上仅做
-                        //    fp16 近似，正常数值误差远小于阈值；真偏色 MAE 通常在 0.1+，
-                        //    阈值取 0.04（≈10/255）留足余量。非近白像素排除后，白底稀释不再漏检。
-                        try {
-                            val refBuf = ImageUtils.hwcToNchwFloatBuffer(tile)
-                            val refTensor = OnnxTensor.createTensor(
-                                env, refBuf, longArrayOf(1L, channels.toLong(), tileIn.toLong(), tileIn.toLong())
-                            )
-                            val refRes = cpuRef.run(Collections.singletonMap(inputName, refTensor))
-                            val refOut = (refRes.get(0) as OnnxTensor).floatBuffer
-                            val refTile = ImageUtils.nchwToHwcMat(refOut, channels, tileIn * scale, tileIn * scale)
-                            refTensor.close()
-                            refRes.close()
-                            val mae = maxChannelMaeOnContent(outTile, refTile, channels)
-                            refTile.release()
-                            if (mae > NNAPI_COLOR_TOL) {
-                                outTile.release()
-                                tile.release()
-                                outU8.release()
-                                return null
-                            }
-                        } catch (_: Exception) {
-                            // 参考比对异常则不阻断 NNAPI（退化为仅“全黑”自检）
-                        }
-                        selfChecked = true
                     }
                 }
-                tile.release()
-
-                // 核心区在 tile 内恒定从 (pad,pad) 起（已验证与 x/y 是否贴边无关）
-                val cropRgb = Mat(
-                    outTile,
-                    Rect(pad * scale, pad * scale, coreW * scale, coreH * scale)
-                )
-                val cropCopy = Mat()
-                cropRgb.copyTo(cropCopy)
-                outTile.release()
-
-                // intensity：围绕 0.5 做对比缩放，在 float 空间计算避免截断误差
-                if (intensity != 1.0f) {
-                    val half = Mat(cropCopy.size(), cropCopy.type(), Scalar(0.5))
-                    val centered = Mat()
-                    Core.subtract(cropCopy, half, centered)
-                    Core.multiply(centered, Scalar(intensity.toDouble()), centered)
-                    Core.add(centered, half, cropCopy)
-                    centered.release()
-                    half.release()
+            }
+            scale = 1
+        } else {
+            require((width == 0 || width > 2) && (height == 0 || height > 2)) {
+                "SR fixed input dimensions are too small for overlapping tiles"
+            }
+            if (width > 0 && height > 0 && outShape[2] > 0 && outShape[3] > 0) {
+                require(outShape[2] % height == 0L && outShape[3] % width == 0L &&
+                    outShape[2] / height == outShape[3] / width) { "SR model must use an integer isotropic scale" }
+                scale = (outShape[3] / width).toInt()
+            } else {
+                val probeW = if (width > 0) width else 32
+                val probeH = if (height > 0) height else 32
+                OnnxTensor.createTensor(env, FloatBuffer.allocate(channels * probeW * probeH),
+                    longArrayOf(1, channels.toLong(), probeH.toLong(), probeW.toLong())).use { tensor ->
+                    session.run(mapOf(session.inputNames.first() to tensor)).use { results ->
+                        val value = results[0] as? OnnxTensor
+                            ?: throw IllegalArgumentException("SR output is not a tensor")
+                        val actual = value.info.shape
+                        require(actual.size == 4 && actual[0] == 1L && actual[1] == channels.toLong() &&
+                            actual[2] % probeH == 0L && actual[3] % probeW == 0L &&
+                            actual[2] / probeH == actual[3] / probeW) { "SR output has an incompatible shape" }
+                        scale = (actual[3] / probeW).toInt()
+                    }
                 }
-
-                // *255 -> uint8（convertTo 的 alpha=255：cvRound + 饱和截断 = clip[0,255]）
-                val cropU8 = Mat()
-                cropCopy.convertTo(cropU8, CvType.CV_8U, 255.0)
-                cropCopy.release()
-
-                // 写入整图输出 ROI
-                val roi = Mat(outU8, Rect(x * scale, y * scale, coreW * scale, coreH * scale))
-                cropU8.copyTo(roi)
-                cropU8.release()
-                roi.release()
-
-                x += coreW
             }
-            y += coreH
-        }
-
-        // 整图偏色兜底（仅 NNAPI + 3 通道 RGB 路径）：在“非近白像素”上统计 R-G 均值，避免白底把
-        // 整体偏色均值稀释到阈值以下而漏检。命中即整图作废，由调用方切 CPU 重跑。
-        // 单通道 Y 无颜色信息，不适用该检查。
-        if (cpuRef != null && channels == 3) {
-            val bias = redShiftOnContent(outU8)
-            if (bias > NNAPI_COLOR_TOL_RGB) {
-                outU8.release()
-                return null
+            require(scale in 1..8) { "Unsupported SR scale: $scale" }
+            val tileW = if (width > 0) width else 384
+            val tileH = if (height > 0) height else 384
+            require(tileW.toLong() * tileH * scale * scale * channels * 8 <= WORK_LIMIT) {
+                "Fixed model tiles exceed the Android inference memory limit"
             }
         }
-
-        return outU8
-    }
-
-    fun close() {
-        modelManager.close()
-    }
-
-    /**
-     * 两个 float HWC Mat 的逐通道 mean absolute error，取各通道中的最大值。
-     * 仅在“非近白像素”（max(R,G,B) < 0.9；单通道取 max < 0.9）上统计，
-     * 去除白底对偏色均值的稀释：染红设备的红偏是加性偏移，白底被 clip 在 1.0 看不出，
-     * 暗部/墨线最明显。用于 NNAPI 输出与 CPU 参考的偏色/失真比对。
-     */
-    private fun maxChannelMaeOnContent(a: Mat, b: Mat, channels: Int = 3): Double {
-        if (channels == 1) {
-            val mask = Mat()
-            Core.compare(a, Scalar(0.9), mask, Core.CMP_LT) // 非近白像素
-            val total = Core.countNonZero(mask)
-            if (total == 0) { mask.release(); return 0.0 } // 整 tile 近白，无法判定，视为通过
-            val d = Mat()
-            Core.absdiff(a, b, d)
-            val m = Core.mean(d, mask).`val`
-            d.release(); mask.release()
-            return m[0]
-        }
-        val ch = ArrayList<Mat>(3)
-        Core.split(a, ch)
-        val m1 = Mat(); val maxc = Mat()
-        Core.max(ch[0], ch[1], m1); Core.max(m1, ch[2], maxc)
-        ch.forEach { it.release() }; m1.release()
-        val mask = Mat()
-        Core.compare(maxc, Scalar(0.9), mask, Core.CMP_LT) // 非近白像素
-        maxc.release()
-        val total = Core.countNonZero(mask)
-        if (total == 0) { mask.release(); return 0.0 } // 整 tile 近白，无法判定，视为通过
-        val d = Mat()
-        Core.absdiff(a, b, d)
-        val m = Core.mean(d, mask).`val`
-        d.release(); mask.release()
-        return maxOf(m[0], m[1], m[2])
-    }
-
-    /**
-     * 整图“红偏”度量：在“非近白像素”上统计 mean(R - G)（uint8 空间 [0,255]）。
-     * 正常动漫各色平均后 R≈G≈B，偏色时 R 独高。排除白底以免稀释。
-     */
-    private fun redShiftOnContent(a: Mat): Double {
-        val ch = ArrayList<Mat>(3)
-        Core.split(a, ch)
-        val m1 = Mat(); val maxc = Mat()
-        Core.max(ch[0], ch[1], m1); Core.max(m1, ch[2], maxc)
-        val mask = Mat()
-        Core.compare(maxc, Scalar(230.0), mask, Core.CMP_LT) // 非近白像素（outRgbU8 为 uint8，阈值取 0.9*255）
-        m1.release(); maxc.release()
-        val rg = Mat()
-        Core.subtract(ch[0], ch[1], rg)
-        ch.forEach { it.release() }
-        val total = Core.countNonZero(mask)
-        val bias = if (total == 0) 0.0 else Core.mean(rg, mask).`val`[0]
-        rg.release(); mask.release()
-        return bias
-    }
-
-    /**
-     * 模型信息：输入通道数（1 = Y 亮度/官方 ACNet，3 = RGB/Real-ESRGAN）+ 放大倍数。
-     * 用一次极小的 dummy 前向（CPU 会话，与 NNAPI 是否偏色无关）测量输出/输入的空间比值，
-     * 并按 modelPath 缓存。依次尝试 3 通道与 1 通道——Real-ESRGAN 吃 RGB，官方 ACNet 吃单通道 Y。
-     *
-     * 用输出 NCHW float buffer 的长度反推边长，避免依赖各 onnxruntime 版本输出 shape API 的差异。
-     */
-    private class ModelInfo(val channels: Int, val scale: Int)
-
-    private val modelInfoCache = HashMap<String, ModelInfo>()
-
-    private fun getModelInfo(modelPath: String, cpuSession: OrtSession): ModelInfo {
-        synchronized(modelInfoCache) {
-            modelInfoCache[modelPath]?.let { return it }
-        }
-        val probeIn = 64 // 正方形小图，输出必为 (probeIn*scale)²，避免动态维度干扰
-        val inputName = cpuSession.inputNames.iterator().next()
-        var found: ModelInfo? = null
-        // 全零 dummy 即可：形状与具体数值无关。先试 3 通道（Real-ESRGAN），失败再试 1 通道（ACNet）。
-        for (ch in intArrayOf(3, 1)) {
-            try {
-                val dummy = Mat.zeros(
-                    probeIn, probeIn,
-                    if (ch == 3) CvType.CV_32FC(3) else CvType.CV_32FC(1)
-                )
-                val buf = ImageUtils.hwcToNchwFloatBuffer(dummy)
-                dummy.release()
-                val tensor = OnnxTensor.createTensor(
-                    env, buf, longArrayOf(1L, ch.toLong(), probeIn.toLong(), probeIn.toLong())
-                )
-                val results = cpuSession.run(Collections.singletonMap(inputName, tensor))
-                val outBuf = (results.get(0) as OnnxTensor).floatBuffer
-                val total = outBuf.remaining().toLong() // 1*ch*outH*outW
-                val px = total / ch
-                val side = kotlin.math.sqrt(px.toDouble()).roundToLong() // 输入正方形 => 输出正方形
-                tensor.close()
-                results.close()
-                val scale =
-                    if (side > 0 && side % probeIn == 0L) (side / probeIn).toInt()
-                    else if (ch == 1) 2 else 4
-                found = ModelInfo(ch, scale)
-                break
-            } catch (_: Exception) {
-                // 通道数不符（1ch 模型拒绝 3ch 输入等），尝试下一个
-            }
-        }
-        val info = found ?: ModelInfo(3, 1)
-        synchronized(modelInfoCache) {
-            modelInfoCache[modelPath] = info
-        }
+        val info = ModelInfo(channels, scale, width, height)
+        metadata.keys.filter { it.path == key.path && it != key }.forEach { metadata.remove(it) }
+        if (metadata.size >= 8) metadata.remove(metadata.keys.first())
+        metadata[key] = info
         return info
     }
 
-    /// 丢弃已缓存的 ONNX 会话（仅关闭 session，不释放 env）。
-    /// 模型切换/导入/删除后调用，使下次推理按当前路径重新加载。
-    fun resetSession() {
-        modelManager.close()
+    fun colorize(input: Bitmap, modelPath: String, modelId: String, inputId: String,
+                 type: String, backend: String, intensity: Float, strength: Float,
+                 outputScale: Double): Output {
+        require(backend == "auto" || backend == "cpu") { "Unsupported backend: $backend" }
+        require(type == "esrgan" || type == "deoldify") { "Unsupported type: $type" }
+        require(intensity.isFinite() && intensity in (if (type == "esrgan") 0.3f else 0f)..1.2f) {
+            "Intensity is outside the supported range"
+        }
+        require(strength.isFinite() && strength in 0f..1f) { "Strength must be in [0,1]" }
+        val key = ModelKey(modelPath, modelId, type)
+        val info = inspect(key)
+        val scale = if (outputScale == 0.0) info.scale.toDouble() else outputScale
+        require(scale.isFinite() && scale >= 1.0 && scale <= info.scale) {
+            "Output scale must be between 1 and native scale ${info.scale}"
+        }
+        val targetW = (input.width * scale).roundToInt()
+        val targetH = (input.height * scale).roundToInt()
+        val nativePixels = input.width.toLong() * input.height * info.scale * info.scale
+        val targetPixels = targetW.toLong() * targetH
+        val noInference = (type == "esrgan" && strength == 0f) || (type == "deoldify" && intensity == 0f)
+        // Bound phase peaks, not the sum of buffers whose lifetimes do not overlap.
+        val inputPixels = input.width.toLong() * input.height
+        val workingBytes = if (type == "deoldify") inputPixels * (if (noInference) 48 else 72)
+            else inputPixels * 20 + targetPixels * 32 + (if (noInference) 0L else nativePixels * 44)
+        require(workingBytes <= WORK_LIMIT) {
+            "Requested output exceeds the 768 MiB Android AI working-image limit; use a smaller input/model scale"
+        }
+        if ((type == "esrgan" && strength == 0f) || (type == "deoldify" && intensity == 0f)) {
+            val bitmap = if (type == "esrgan") ImageUtils.renderSr(input, null, targetW, targetH, 0f)
+                else renderColor(input, null, 0f)
+            return Output(bitmap, "none", info.scale, false, null)
+        }
+        val cacheKey = CacheKey(key, inputId, backend)
+        cache[cacheKey]?.let { base ->
+            return Output(render(input, base, info, type, targetW, targetH, intensity, strength),
+                base.backend, info.scale, true, base.reason)
+        }
+        // A changed identity cannot keep the old model's image results alive indefinitely.
+        val stale = cache.keys.filter { it.model.path == modelPath && it.model.identity != modelId }
+        stale.forEach { removeCached(it) }
+        val base = infer(input, key, info, backend)
+        try {
+            val rendered = render(input, base, info, type, targetW, targetH, intensity, strength)
+            if (base.bytes <= CACHE_LIMIT) {
+                while (cacheBytes + base.bytes > CACHE_LIMIT) removeCached(cache.keys.first())
+                cache[cacheKey] = base
+                cacheBytes += base.bytes
+            }
+            return Output(rendered, base.backend, info.scale, false, base.reason)
+        } finally {
+            if (cache[cacheKey] !== base) base.pixels.release()
+        }
+    }
+
+    private fun infer(input: Bitmap, key: ModelKey, info: ModelInfo, backend: String): Base {
+        val cpu = models.getSession(key.path, key.identity, false)
+        if (key.type == "deoldify") return Base(inferColor(input, cpu.ort), "cpu", null)
+        if (backend == "cpu") return Base(inferSr(input, cpu.ort, info, null), "cpu", null)
+        try {
+            val accelerated = models.getSession(key.path, key.identity, true)
+            val pixels = inferSr(input, accelerated.ort, info, cpu.ort, accelerated::recordExecution)
+            return Base(pixels, accelerated.backend, accelerated.fallbackReason)
+        } catch (e: Exception) {
+            models.discard(key.path, key.identity, true)
+            return Base(inferSr(input, cpu.ort, info, null), "cpu", "NNAPI fallback: ${e.message}")
+        }
+    }
+
+    /** Preserve the original Android DeOldify channel and luminance conventions, in float. */
+    private fun inferColor(input: Bitmap, session: OrtSession): Mat = Mats().use { m ->
+        val bgr = m.own(ImageUtils.bitmapToBgrMat(input))
+        val gray = m.create()
+        Imgproc.cvtColor(bgr, gray, Imgproc.COLOR_BGR2GRAY)
+        val grayRgb = m.create()
+        Imgproc.cvtColor(gray, grayRgb, Imgproc.COLOR_GRAY2RGB)
+        val resized = m.create()
+        Imgproc.resize(grayRgb, resized, Size(256.0, 256.0))
+        val tensorInput = m.create()
+        resized.convertTo(tensorInput, CvType.CV_32F) // DeOldify expects 0..255, not 0..1.
+        val predicted = m.own(run(session, tensorInput, 3, 256, 256))
+        val swapped = m.create()
+        Imgproc.cvtColor(predicted, swapped, Imgproc.COLOR_BGR2RGB)
+        swapped.convertTo(swapped, CvType.CV_32F, 1.0 / 255.0)
+        val full = m.create()
+        Imgproc.resize(swapped, full, Size(input.width.toDouble(), input.height.toDouble()))
+        Imgproc.GaussianBlur(full, full, Size(13.0, 13.0), 0.0)
+        val lab = m.create()
+        // Historical Android behavior deliberately treats swapped RGB as BGR here.
+        Imgproc.cvtColor(full, lab, Imgproc.COLOR_BGR2Lab)
+        val a = m.create(); val b = m.create()
+        Core.extractChannel(lab, a, 1); Core.extractChannel(lab, b, 2)
+        val ab = m.create()
+        Core.merge(listOf(a, b), ab)
+        m.keep(ab) // Unquantized signed chroma; render intensity never enters inference.
+    }
+
+    private fun renderColor(input: Bitmap, chroma: Mat?, intensity: Float): Bitmap = Mats().use { m ->
+        val bgr = m.own(ImageUtils.bitmapToBgrMat(input))
+        val luminance = m.create()
+        Core.extractChannel(bgr, luminance, 0)
+        luminance.convertTo(luminance, CvType.CV_32F, 100.0 / 255.0)
+        val ab = if (chroma == null) m.own(Mat.zeros(input.height, input.width, CvType.CV_32FC2))
+            else m.create().also { chroma.convertTo(it, CvType.CV_32F, intensity.toDouble()) }
+        val lab = m.create()
+        Core.merge(listOf(luminance, ab), lab)
+        val result = m.create()
+        Imgproc.cvtColor(lab, result, Imgproc.COLOR_Lab2BGR)
+        result.convertTo(result, CvType.CV_8U, 255.0)
+        val bitmap = ImageUtils.bgrMatToBitmap(result)
+        ImageUtils.copyAlpha(input, bitmap)
+        bitmap
+    }
+
+    private fun inferSr(input: Bitmap, session: OrtSession, info: ModelInfo, cpu: OrtSession?,
+                        onExecution: (() -> Unit)? = null): Mat =
+        Mats().use { m ->
+            val bgr = m.own(ImageUtils.bitmapToBgrMat(input))
+            val source = m.create()
+            Imgproc.cvtColor(bgr, source, if (info.channels == 1) Imgproc.COLOR_BGR2YCrCb else Imgproc.COLOR_BGR2RGB)
+            source.convertTo(source, CvType.CV_32F, 1.0 / 255.0)
+            val modelInput = if (info.channels == 3) source else m.create().also { Core.extractChannel(source, it, 0) }
+            val inferred = m.own(tiles(modelInput, session, info, cpu, onExecution))
+            if (info.channels == 3) return@use m.keep(inferred)
+            val cr = m.create(); val cb = m.create()
+            Core.extractChannel(source, cr, 1); Core.extractChannel(source, cb, 2)
+            Imgproc.resize(cr, cr, inferred.size(), 0.0, 0.0, Imgproc.INTER_LINEAR)
+            Imgproc.resize(cb, cb, inferred.size(), 0.0, 0.0, Imgproc.INTER_LINEAR)
+            val ycrcb = m.create()
+            Core.merge(listOf(inferred, cr, cb), ycrcb)
+            m.keep(ycrcb)
+        }
+
+    private fun tiles(input: Mat, session: OrtSession, info: ModelInfo, cpu: OrtSession?,
+                      onExecution: (() -> Unit)?): Mat = Mats().use { m ->
+        val scale = info.scale
+        val tileW = if (info.inputWidth > 0) info.inputWidth else 384
+        val tileH = if (info.inputHeight > 0) info.inputHeight else 384
+        val padX = minOf(16, (tileW - 1) / 3)
+        val padY = minOf(16, (tileH - 1) / 3)
+        val coreW = tileW - 2 * padX
+        val coreH = tileH - 2 * padY
+        val output = m.own(Mat(input.rows() * scale, input.cols() * scale, CvType.CV_32FC(info.channels)))
+        var checkedContent = false
+        var y = 0
+        while (y < input.rows()) {
+            val h = minOf(coreH, input.rows() - y)
+            var x = 0
+            while (x < input.cols()) {
+                val w = minOf(coreW, input.cols() - x)
+                Mats().use { tileMats ->
+                    val x0 = maxOf(0, x - padX); val y0 = maxOf(0, y - padY)
+                    val x1 = minOf(input.cols(), x + w + padX); val y1 = minOf(input.rows(), y + h + padY)
+                    val left = maxOf(0, padX - x); val top = maxOf(0, padY - y)
+                    val source = tileMats.own(Mat(input, Rect(x0, y0, x1 - x0, y1 - y0)))
+                    val tile = tileMats.create()
+                    Core.copyMakeBorder(source, tile, top, tileH - top - source.rows(),
+                        left, tileW - left - source.cols(), Core.BORDER_REPLICATE)
+                    val prediction = tileMats.own(run(session, tile, info.channels, tileH * scale, tileW * scale))
+                    // Stop profiling after the first fixed-shape tile; never accumulate a page-sized trace.
+                    onExecution?.invoke()
+                    // Compare the first non-flat tile against the actual CPU model, not a color heuristic.
+                    if (cpu != null && !checkedContent && hasContent(tile)) {
+                        val reference = tileMats.own(run(cpu, tile, info.channels, tileH * scale, tileW * scale))
+                        require(contentError(prediction, reference) <= 0.04) {
+                            "NNAPI output differs from the CPU reference"
+                        }
+                        checkedContent = true
+                    }
+                    val crop = tileMats.own(Mat(prediction, Rect(padX * scale, padY * scale, w * scale, h * scale)))
+                    val destination = tileMats.own(Mat(output, Rect(x * scale, y * scale, w * scale, h * scale)))
+                    crop.copyTo(destination)
+                }
+                x += w
+            }
+            y += h
+        }
+        m.keep(output)
+    }
+
+    private fun hasContent(input: Mat): Boolean {
+        val row = FloatArray(input.cols() * input.channels())
+        var low = Float.POSITIVE_INFINITY; var high = Float.NEGATIVE_INFINITY
+        for (y in 0 until input.rows()) {
+            input.get(y, 0, row)
+            for (v in row) { low = minOf(low, v); high = maxOf(high, v) }
+            if (high - low > 0.02f) return true
+        }
+        return false
+    }
+
+    private fun contentError(prediction: Mat, reference: Mat): Double {
+        val channels = prediction.channels()
+        val a = FloatArray(prediction.cols() * channels)
+        val b = FloatArray(a.size)
+        val errors = DoubleArray(channels)
+        var count = 0L
+        for (y in 0 until prediction.rows()) {
+            prediction.get(y, 0, a); reference.get(y, 0, b)
+            for (x in 0 until prediction.cols()) {
+                val offset = x * channels
+                var nearWhite = false
+                for (c in 0 until channels) if (b[offset + c] >= 0.9f) { nearWhite = true; break }
+                if (nearWhite) continue
+                count++
+                for (c in 0 until channels) errors[c] += kotlin.math.abs(a[offset + c] - b[offset + c])
+            }
+        }
+        return if (count == 0L) 0.0 else errors.maxOrNull()!! / count
+    }
+
+    private fun run(session: OrtSession, input: Mat, channels: Int, height: Int, width: Int): Mat {
+        OnnxTensor.createTensor(env, ImageUtils.hwcToNchwFloatBuffer(input),
+            longArrayOf(1, channels.toLong(), input.rows().toLong(), input.cols().toLong())).use { tensor ->
+            session.run(mapOf(session.inputNames.first() to tensor)).use { results ->
+                val output = results[0] as? OnnxTensor ?: throw IllegalArgumentException("Expected tensor output")
+                require(output.info.shape.contentEquals(longArrayOf(1, channels.toLong(), height.toLong(), width.toLong()))) {
+                    "Unexpected model output dimensions"
+                }
+                val values = output.floatBuffer
+                for (i in 0 until values.remaining()) require(values.get(i).isFinite()) { "Model returned non-finite pixels" }
+                return ImageUtils.nchwToHwcMat(values, channels, height, width)
+            }
+        }
+    }
+
+    private fun render(input: Bitmap, base: Base, info: ModelInfo, type: String, width: Int,
+                       height: Int, intensity: Float, strength: Float): Bitmap {
+        if (type == "deoldify") return renderColor(input, base.pixels, intensity)
+        return Mats().use { m ->
+            val enhanced = if (info.channels == 3 && intensity == 1f) base.pixels
+                else m.own(base.pixels.clone())
+            if (intensity != 1f) {
+                if (info.channels == 1) {
+                    val y = m.create()
+                    Core.extractChannel(enhanced, y, 0)
+                    y.convertTo(y, CvType.CV_32F, intensity.toDouble(), 0.5 * (1 - intensity))
+                    Core.insertChannel(y, enhanced, 0)
+                    m.keep(y).release()
+                } else {
+                    enhanced.convertTo(enhanced, CvType.CV_32F, intensity.toDouble(), 0.5 * (1 - intensity))
+                }
+            }
+            if (info.channels == 1) {
+                // The legacy ACNet pipeline used uint8 YCrCb, whose neutral chroma is 128/255.
+                val u8 = m.create()
+                enhanced.convertTo(u8, CvType.CV_8U, 255.0)
+                Imgproc.cvtColor(u8, u8, Imgproc.COLOR_YCrCb2RGB)
+                u8.convertTo(enhanced, CvType.CV_32F, 1.0 / 255.0)
+                m.keep(u8).release()
+            }
+            ImageUtils.renderSr(input, enhanced, width, height, strength)
+        }
+    }
+
+    private fun removeCached(key: CacheKey) {
+        cache.remove(key)?.let { cacheBytes -= it.bytes; it.pixels.release() }
+    }
+
+    fun resetSession(path: String? = null) {
+        cache.keys.filter { path == null || it.model.path == path }.forEach { removeCached(it) }
+        metadata.keys.filter { path == null || it.path == path }.forEach { metadata.remove(it) }
+        models.reset(path)
+    }
+
+    companion object {
+        private const val CACHE_LIMIT = 128L * 1024 * 1024
+        private const val WORK_LIMIT = 768L * 1024 * 1024
     }
 }

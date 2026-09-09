@@ -5,11 +5,10 @@ import 'package:flutter_qjs/flutter_qjs.dart';
 import 'package:venera/foundation/js_engine.dart';
 import 'package:venera/network/images.dart';
 import 'package:venera/utils/io.dart';
-import 'package:venera/foundation/log.dart';
 import 'base_image_provider.dart';
 import 'reader_image.dart' as image_provider;
 import 'package:venera/foundation/appdata.dart';
-import 'package:venera/foundation/app.dart';
+import 'package:venera/utils/image_ai_service.dart';
 import 'package:venera/utils/anime4k/anime4k_service.dart';
 import 'package:venera/utils/anime4k/anime4k_v4_service.dart';
 import 'package:venera/utils/colorization/colorization_service.dart';
@@ -17,7 +16,13 @@ import 'package:venera/utils/colorization/colorization_service.dart';
 class ReaderImageProvider
     extends BaseImageProvider<image_provider.ReaderImageProvider> {
   /// Image provider for normal image.
-  const ReaderImageProvider(this.imageKey, this.sourceKey, this.cid, this.eid, this.page);
+  const ReaderImageProvider(
+    this.imageKey,
+    this.sourceKey,
+    this.cid,
+    this.eid,
+    this.page,
+  );
 
   final String imageKey;
 
@@ -31,6 +36,31 @@ class ReaderImageProvider
 
   @override
   Future<Uint8List> load(chunkEvents, checkStop) async {
+    // Snapshot per-comic settings before IO. A refresh creates a new request;
+    // this request must not mix old SR parameters with new color parameters.
+    final aiSettings = <String, dynamic>{
+      for (final setting in [
+        'enableAnime4K',
+        'anime4KVersion',
+        'anime4KV4Intensity',
+        'anime4KV4OutputScale',
+        'anime4KEnhancementStrength',
+        'imageAiBackend',
+        'anime4KScaleFactor',
+        'anime4KPushStrength',
+        'anime4KPushGradStrength',
+        'enableColorization',
+        'colorizationIntensity',
+      ])
+        setting: appdata.settings.getReaderSetting(
+          cid,
+          sourceKey ?? '',
+          setting,
+        ),
+    };
+    double parameter(String key, double fallback) =>
+        (aiSettings[key] as num?)?.toDouble() ?? fallback;
+    final backend = aiSettings['imageAiBackend'] as String? ?? 'auto';
     Uint8List? imageBytes;
     if (imageKey.startsWith('file://')) {
       // Strip the "file://" prefix to get the actual file path.
@@ -43,13 +73,19 @@ class ReaderImageProvider
         throw "Error: File not found.";
       }
     } else {
-      await for (var event
-        in ImageDownloader.loadComicImage(imageKey, sourceKey, cid, eid)) {
+      await for (var event in ImageDownloader.loadComicImage(
+        imageKey,
+        sourceKey,
+        cid,
+        eid,
+      )) {
         checkStop();
-        chunkEvents.add(ImageChunkEvent(
-          cumulativeBytesLoaded: event.currentBytes,
-          expectedTotalBytes: event.totalBytes,
-        ));
+        chunkEvents.add(
+          ImageChunkEvent(
+            cumulativeBytesLoaded: event.currentBytes,
+            expectedTotalBytes: event.totalBytes,
+          ),
+        );
         if (event.imageBytes != null) {
           imageBytes = event.imageBytes;
           break;
@@ -105,8 +141,7 @@ class ReaderImageProvider
               while (futureImage == null) {
                 try {
                   checkStop();
-                }
-                catch(e) {
+                } catch (e) {
                   onCancel([]);
                   rethrow;
                 }
@@ -120,87 +155,48 @@ class ReaderImageProvider
         }
       }
     }
-    // ===== Anime4K 超分处理 =====
-    // 在 ImageProvider.load 阶段处理图片字节，与自定义图片处理相同位置，
-    // 确保无论阅读器用什么 widget 渲染都会生效。
-    // v1（纯 Dart CPU 算法）与 v4（ONNX Runtime + NNAPI GPU，AI 模型）并存，
-    // 由 anime4KVersion 选择引擎；v4 仅 Android 生效，否则自动回退 v1。
-    final anime4KVersion = appdata.settings.getReaderSetting(
-          cid, sourceKey ?? "", 'anime4KVersion') ??
-        'v1';
-    final enableAnime4K = appdata.settings.getReaderSetting(
-          cid, sourceKey ?? "", 'enableAnime4K') ==
-        true;
-    if (enableAnime4K) {
-      if (anime4KVersion == 'v4' &&
-          App.isAndroid &&
-          Anime4KV4Service.instance.isAvailable) {
-        try {
-          final result = await Anime4KV4Service.instance.processImage(
-            imageBytes: bytes,
-            cacheKey: key,
-            intensity: (appdata.settings.getReaderSetting(
-                      cid, sourceKey ?? "", 'anime4KV4Intensity') as num?)
-                    ?.toDouble() ??
-                1.0,
-          );
-          if (result != null) {
-            bytes = result;
-          }
-        } catch (e, s) {
-          Log.error('ReaderImage', 'Anime4K v4 processing error: $e', s);
-        }
+    // Always run super-resolution before colorization. Missing/unsupported AI
+    // keeps the readable image and an explicit failure, never a v1 fallback.
+    ImageAiStatus? incompleteStage;
+    if (aiSettings['enableAnime4K'] == true) {
+      final strength = parameter('anime4KEnhancementStrength', 1.0);
+      final Uint8List? enhanced;
+      if (aiSettings['anime4KVersion'] == 'v4') {
+        enhanced = await Anime4KV4Service.instance.processImage(
+          imageBytes: bytes,
+          cacheKey: key,
+          intensity: parameter('anime4KV4Intensity', 1.0),
+          outputScale: parameter('anime4KV4OutputScale', 0.0),
+          strength: strength,
+          backend: backend,
+        );
       } else {
-        try {
-          final result = await Anime4KService.instance.processImage(
-            imageBytes: bytes,
-            cacheKey: key,
-            scaleFactor: (appdata.settings.getReaderSetting(
-                      cid, sourceKey ?? "", 'anime4KScaleFactor') as num?)
-                  ?.toDouble() ??
-              2.0,
-            pushStrength: (appdata.settings.getReaderSetting(
-                      cid, sourceKey ?? "", 'anime4KPushStrength') as num?)
-                  ?.toDouble() ??
-              0.31,
-            pushGradStrength: (appdata.settings.getReaderSetting(
-                      cid, sourceKey ?? "", 'anime4KPushGradStrength') as num?)
-                  ?.toDouble() ??
-              1.0,
-          );
-          if (result != null) {
-            bytes = result;
-          }
-        } catch (e, s) {
-          Log.error('ReaderImage', 'Anime4K processing error: $e', s);
-        }
+        enhanced = await Anime4KService.instance.processImage(
+          imageBytes: bytes,
+          cacheKey: key,
+          scaleFactor: parameter('anime4KScaleFactor', 2.0),
+          pushStrength: parameter('anime4KPushStrength', 0.31),
+          pushGradStrength: parameter('anime4KPushGradStrength', 1.0),
+          strength: strength,
+        );
+      }
+      if (enhanced != null) {
+        bytes = enhanced;
+      } else {
+        incompleteStage = ImageAiService.instance.status.value;
       }
     }
-
-    // ===== AI 上色处理 =====
-    final enableColorization = appdata.settings.getReaderSetting(
-          cid, sourceKey ?? "", 'enableColorization') ==
-        true;
-    if (enableColorization) {
-      try {
-        if (!ColorizationService.instance.isModelAvailable) {
-          await ColorizationService.instance.checkModelAvailable();
-        }
-        if (ColorizationService.instance.isModelAvailable) {
-          final result = await ColorizationService.instance.processImage(
-            imageBytes: bytes,
-            cacheKey: key,
-            intensity: (appdata.settings.getReaderSetting(
-                      cid, sourceKey ?? "", 'colorizationIntensity') as num?)
-                  ?.toDouble() ??
-                1.0,
-          );
-          if (result != null) {
-            bytes = result;
-          }
-        }
-      } catch (e, s) {
-        Log.error('ReaderImage', 'Colorization processing error: $e', s);
+    if (aiSettings['enableColorization'] == true) {
+      final colored = await ColorizationService.instance.processImage(
+        imageBytes: bytes,
+        cacheKey: key,
+        intensity: parameter('colorizationIntensity', 1.0),
+        backend: backend,
+      );
+      if (colored != null) bytes = colored;
+      // A successful later stage must not advertise the whole page as complete.
+      if (incompleteStage != null) {
+        ImageAiService.instance.status.value = incompleteStage;
       }
     }
 

@@ -20,7 +20,7 @@ class _ReaderSettingsState extends State<ReaderSettings> {
   bool _isChapterCommentsAtEndSupported() {
     String? readerMode;
     bool? showChapterComments;
-    
+
     if (widget.comicId != null &&
         widget.comicSource != null &&
         appdata.settings.isComicSpecificSettingsEnabled(
@@ -41,18 +41,18 @@ class _ReaderSettingsState extends State<ReaderSettings> {
       readerMode = appdata.settings['readerMode'] as String?;
       showChapterComments = appdata.settings['showChapterComments'] as bool?;
     }
-    
+
     // Must have showChapterComments enabled and be in gallery mode
     if (showChapterComments != true) return false;
-    
+
     return readerMode == 'galleryLeftToRight' ||
         readerMode == 'galleryRightToLeft';
   }
-  
+
   void _onShowChapterCommentsChanged() {
     // When showChapterComments is turned off, also turn off showChapterCommentsAtEnd
     bool? showChapterComments;
-    
+
     if (widget.comicId != null &&
         widget.comicSource != null &&
         appdata.settings.isComicSpecificSettingsEnabled(
@@ -78,7 +78,7 @@ class _ReaderSettingsState extends State<ReaderSettings> {
         appdata.settings['showChapterCommentsAtEnd'] = false;
       }
     }
-    
+
     setState(() {});
     widget.onChanged?.call("showChapterComments");
   }
@@ -110,6 +110,8 @@ class _ReaderSettingsState extends State<ReaderSettings> {
                       b,
                     );
                   });
+                  appdata.saveData();
+                  _refreshAiImages();
                 },
               ).toSliver(),
               if (isEnabledSpecificSettings)
@@ -119,6 +121,8 @@ class _ReaderSettingsState extends State<ReaderSettings> {
                       setState(() {
                         appdata.settings.resetComicReaderSettings(key);
                       });
+                      appdata.saveData();
+                      _refreshAiImages();
                     },
                     child: Text(
                       "Clear specific reader settings for this comic".tl,
@@ -159,9 +163,21 @@ class _ReaderSettingsState extends State<ReaderSettings> {
           title: "Enable Anime4K".tl,
           titleStyle: TextStyle(color: context.colorScheme.primary),
           settingKey: "enableAnime4K",
+          beforeChange: (enabled) async {
+            if (!enabled) return true;
+            final version = isEnabledSpecificSettings
+                ? appdata.settings.getReaderSetting(
+                    comicId,
+                    sourceKey!,
+                    'anime4KVersion',
+                  )
+                : appdata.settings['anime4KVersion'];
+            if (version != 'v4') return true;
+            if (!await _allowImageAi(context)) return false;
+            return Anime4KV4Service.instance.checkModelAvailable();
+          },
           onChanged: () {
-            PaintingBinding.instance.imageCache.clear();
-            ComicImage.clear();
+            _refreshAiImages();
             widget.onChanged?.call("enableAnime4K");
           },
           comicId: isEnabledSpecificSettings ? widget.comicId : null,
@@ -169,19 +185,24 @@ class _ReaderSettingsState extends State<ReaderSettings> {
         ).toSliver(),
         SelectSetting(
           title: "Anime4K Version".tl,
-          help: "v4 requires model download (Android only)".tl,
+          help:
+              "AI requires a compatible model and an Android or Windows backend."
+                  .tl,
           settingKey: "anime4KVersion",
-          optionTranslation: {
-            "v1": "v1 (CPU)".tl,
-            "v4": "v4 (AI · GPU)".tl,
-          },
+          optionTranslation: {"v1": "v1 (CPU)".tl, "v4": "v4 (AI)".tl},
           onChanged: () {
-            PaintingBinding.instance.imageCache.clear();
-            ComicImage.clear();
+            _refreshAiImages();
+            setState(() {});
             widget.onChanged?.call("anime4KVersion");
           },
           comicId: isEnabledSpecificSettings ? widget.comicId : null,
           comicSource: isEnabledSpecificSettings ? widget.comicSource : null,
+        ).toSliver(),
+        _ImageAiControls(
+          superResolution: true,
+          comicId: isEnabledSpecificSettings ? widget.comicId : null,
+          comicSource: isEnabledSpecificSettings ? widget.comicSource : null,
+          onChanged: widget.onChanged,
         ).toSliver(),
         _SwitchSetting(
           title: "Enable Colorization(AI上色)".tl,
@@ -191,14 +212,16 @@ class _ReaderSettingsState extends State<ReaderSettings> {
           ),
           settingKey: "enableColorization",
           onChanged: () {
-            PaintingBinding.instance.imageCache.clear();
-            ComicImage.clear();
+            _refreshAiImages();
             widget.onChanged?.call("enableColorization");
           },
           beforeChange: (newValue) async {
             if (!newValue) return true;
+            if (!await _allowImageAi(context)) return false;
             final downloaded = await ColorizationModelManager.isModelDownloaded;
-            if (downloaded) return true;
+            if (downloaded) {
+              return ColorizationService.instance.checkModelAvailable();
+            }
             if (!mounted) return false;
             showDialog(
               context: context,
@@ -229,6 +252,12 @@ class _ReaderSettingsState extends State<ReaderSettings> {
           },
           comicId: isEnabledSpecificSettings ? widget.comicId : null,
           comicSource: isEnabledSpecificSettings ? widget.comicSource : null,
+        ).toSliver(),
+        _ImageAiControls(
+          superResolution: false,
+          comicId: isEnabledSpecificSettings ? widget.comicId : null,
+          comicSource: isEnabledSpecificSettings ? widget.comicSource : null,
+          onChanged: widget.onChanged,
         ).toSliver(),
         ListTile(
           title: Text("Colorization Settings".tl),

@@ -82,6 +82,8 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+  image_ai_bridge_ = std::make_unique<image_ai::Bridge>(
+      flutter_controller_->engine()->messenger(), GetHandle());
 
   const flutter::MethodChannel<> channel(
       flutter_controller_->engine()->messenger(), "venera/method_channel",
@@ -192,6 +194,7 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  image_ai_bridge_.reset();
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }
@@ -215,6 +218,10 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  if (message == image_ai::Bridge::kCompletionMessage) {
+    if (image_ai_bridge_) image_ai_bridge_->DrainReplies();
+    return 0;
+  }
   // Give Flutter, including plugins, an opportunity to handle window messages.
     UINT button = GET_XBUTTON_WPARAM(wparam);
     if (button == XBUTTON1 && message == 528)

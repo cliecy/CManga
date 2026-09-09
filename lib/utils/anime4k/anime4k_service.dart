@@ -5,10 +5,10 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:venera/foundation/log.dart';
-import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 
+import '../image_ai_service.dart';
 import 'anime4k_upscaler.dart';
 
 /// Anime4K 超分服务
@@ -27,11 +27,12 @@ class Anime4KService {
   /// 缓存目录路径
   String? _cacheDir;
 
-  /// 正在处理的任务集合（避免重复处理同一图片）
-  final Set<String> _processingKeys = {};
+  final _inFlight = <String, Future<Uint8List?>>{};
+  int _queuedBytes = 0;
+  int _generation = 0;
 
   /// 最大并发处理数
-  static const int _maxConcurrentTasks = 2;
+  static const int _maxConcurrentTasks = 1;
 
   /// 当前正在运行的任务数
   int _runningTasks = 0;
@@ -60,7 +61,10 @@ class Anime4KService {
   String? _getCachePath(String key) {
     if (_cacheDir == null) return null;
     final hash = sha256.convert(utf8.encode(key)).toString();
-    return path.join(_cacheDir!, '$hash.png');
+    return path.join(
+      _cacheDir!,
+      '${key.startsWith('v1-base-') ? 'base' : 'render'}_$hash.png',
+    );
   }
 
   /// 检查是否有缓存，有则返回缓存数据
@@ -87,6 +91,21 @@ class Anime4KService {
     try {
       final file = File(cachePath);
       await file.writeAsBytes(data);
+      final entries = <({File file, FileStat stat})>[];
+      var total = 0;
+      await for (final entry in Directory(_cacheDir!).list()) {
+        if (entry is File) {
+          final stat = await entry.stat();
+          entries.add((file: entry, stat: stat));
+          total += stat.size;
+        }
+      }
+      entries.sort((a, b) => a.stat.modified.compareTo(b.stat.modified));
+      for (final entry in entries) {
+        if (total <= 256 * 1024 * 1024) break;
+        await entry.file.delete();
+        total -= entry.stat.size;
+      }
     } catch (e) {
       Log.error('Anime4K', 'Anime4K cache save error: $e');
     }
@@ -105,54 +124,112 @@ class Anime4KService {
     double scaleFactor = 2.0,
     double pushStrength = 0.31,
     double pushGradStrength = 1.0,
+    double strength = 1.0,
   }) async {
-    // 生成唯一缓存键（包含参数信息）
-    final fullKey =
-        '${cacheKey}_${scaleFactor}_${pushStrength}_$pushGradStrength';
-
-    // 优先从缓存读取
-    final cached = await _getFromCache(fullKey);
-    if (cached != null) {
-      Log.info('Anime4K', 'cache hit for $cacheKey');
-      return cached;
-    }
-
-    // 防止重复处理同一图片
-    if (_processingKeys.contains(fullKey)) {
-      Log.info('Anime4K', 'already processing $cacheKey');
+    if (!scaleFactor.isFinite ||
+        scaleFactor < 1 ||
+        scaleFactor > 4 ||
+        !strength.isFinite ||
+        strength < 0 ||
+        strength > 1 ||
+        !pushStrength.isFinite ||
+        pushStrength < 0 ||
+        pushStrength > 2 ||
+        !pushGradStrength.isFinite ||
+        pushGradStrength < 0 ||
+        pushGradStrength > 2) {
+      ImageAiService.instance.reportError(
+        'Invalid v1 scale or enhancement strength',
+      );
       return null;
     }
-
-    _processingKeys.add(fullKey);
-
-    return _enqueueTask(() async {
+    final inputId = sha256.convert(imageBytes).toString();
+    final baseKey =
+        'v1-base-v3:$inputId:$scaleFactor:$pushStrength:$pushGradStrength';
+    final fullKey = 'v1-render-v3:$baseKey:$strength';
+    final existing = _inFlight[fullKey];
+    if (existing != null) return existing;
+    if (_taskQueue.length >= 16 ||
+        _queuedBytes + imageBytes.length > 128 * 1024 * 1024) {
+      ImageAiService.instance.reportError(
+        'Super-resolution queue is full; reload this page',
+      );
+      return null;
+    }
+    _queuedBytes += imageBytes.length;
+    final generation = _generation;
+    final future = _enqueueTask<Uint8List>(() async {
       try {
-        Log.info('Anime4K', 'processing image $cacheKey, '
-            'scale: $scaleFactor, push: $pushStrength, grad: $pushGradStrength');
-
-        final params = Anime4KParams(
-          imageBytes: imageBytes,
-          pushStrength: pushStrength,
-          pushGradStrength: pushGradStrength,
-          scaleFactor: scaleFactor,
-        );
-
-        final result = await Anime4KUpscaler.processInIsolate(params);
-
-        if (result != null) {
-          // 保存到缓存
-          await _saveToCache(fullKey, result);
-          Log.info('Anime4K', 'processing complete for $cacheKey');
+        if (_cacheDir == null) await init();
+        final cached = await _getFromCache(fullKey);
+        if (cached != null) {
+          ImageAiService.instance.status.value = const ImageAiStatus(
+            message: 'v1 rendered image cache (CPU)',
+            backend: 'cpu',
+            cacheHit: true,
+          );
+          return cached;
         }
-
+        ImageAiService.instance.status.value = const ImageAiStatus(
+          message: 'v1 super-resolution processing (CPU)',
+          backend: 'cpu',
+          isProcessing: true,
+        );
+        Uint8List? enhanced;
+        var baseCacheHit = false;
+        if (strength > 0) {
+          enhanced = await _getFromCache(baseKey);
+          baseCacheHit = enhanced != null;
+          enhanced ??= await Anime4KUpscaler.processInIsolate(
+            Anime4KParams(
+              imageBytes: imageBytes,
+              pushStrength: pushStrength,
+              pushGradStrength: pushGradStrength,
+              scaleFactor: scaleFactor,
+            ),
+          );
+          if (enhanced == null) {
+            throw StateError('v1 could not decode or enhance this image');
+          }
+          if (!baseCacheHit && generation == _generation) {
+            await _saveToCache(baseKey, enhanced);
+          }
+        }
+        final result = await Anime4KUpscaler.renderInIsolate(
+          Anime4KRenderParams(
+            imageBytes: imageBytes,
+            enhancedBytes: enhanced,
+            scaleFactor: scaleFactor,
+            strength: strength,
+          ),
+        );
+        if (generation == _generation) await _saveToCache(fullKey, result);
+        ImageAiService.instance.status.value = ImageAiStatus(
+          message: strength == 0
+              ? 'Base image resized; v1 enhancement skipped'
+              : baseCacheHit
+              ? 'v1 enhancement cache; strength rendered (CPU)'
+              : 'v1 super-resolution complete (CPU)',
+          backend: 'cpu',
+          cacheHit: baseCacheHit,
+        );
         return result;
-      } catch (e) {
-        Log.error('Anime4K', 'Anime4K processing error: $e');
+      } catch (error) {
+        ImageAiService.instance.reportError(
+          error,
+          operation: 'v1 super-resolution failed',
+        );
         return null;
       } finally {
-        _processingKeys.remove(fullKey);
+        _queuedBytes -= imageBytes.length;
       }
     });
+    _inFlight[fullKey] = future;
+    try {
+      return await future;
+    } finally {
+      _inFlight.remove(fullKey);
+    }
   }
 
   /// 将任务加入队列并按序执行
@@ -192,6 +269,7 @@ class Anime4KService {
     double scaleFactor = 2.0,
     double pushStrength = 0.31,
     double pushGradStrength = 1.0,
+    double strength = 1.0,
   }) async {
     try {
       final file = File(filePath);
@@ -204,6 +282,7 @@ class Anime4KService {
         scaleFactor: scaleFactor,
         pushStrength: pushStrength,
         pushGradStrength: pushGradStrength,
+        strength: strength,
       );
     } catch (e) {
       Log.error('Anime4K', 'Anime4K file processing error: $e');
@@ -211,14 +290,18 @@ class Anime4KService {
     }
   }
 
-  /// 清除所有超分缓存
+  /// Clear rendered images without discarding reusable algorithm results.
   Future<void> clearCache() async {
+    _generation++;
     if (_cacheDir == null) return;
     try {
       final dir = Directory(_cacheDir!);
       if (await dir.exists()) {
-        await dir.delete(recursive: true);
-        await dir.create(recursive: true);
+        await for (final entry in dir.list()) {
+          if (entry is File && !path.basename(entry.path).startsWith('base_')) {
+            await entry.delete();
+          }
+        }
       }
       Log.info('Anime4K', 'Anime4K: cache cleared');
     } catch (e) {

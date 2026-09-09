@@ -357,6 +357,7 @@ class _EndSelectorSelectSettingState extends State<_EndSelectorSelectSetting> {
 
 class _SliderSetting extends StatefulWidget {
   const _SliderSetting({
+    super.key,
     required this.title,
     required this.settingsIndex,
     required this.interval,
@@ -365,6 +366,9 @@ class _SliderSetting extends StatefulWidget {
     this.onChanged,
     this.comicId,
     this.comicSource,
+    this.preciseInput = false,
+    this.displayScale = 1.0,
+    this.suffix = '',
   });
 
   final String title;
@@ -383,64 +387,89 @@ class _SliderSetting extends StatefulWidget {
 
   final String? comicSource;
 
+  /// AI parameters commit on release, rather than launching work on every tick.
+  final bool preciseInput;
+  final double displayScale;
+  final String suffix;
+
   @override
   State<_SliderSetting> createState() => _SliderSettingState();
 }
 
 class _SliderSettingState extends State<_SliderSetting> {
+  double? _preview;
+
+  double get _storedValue =>
+      ((widget.comicId == null
+                  ? appdata.settings[widget.settingsIndex]
+                  : appdata.settings.getReaderSetting(
+                      widget.comicId!,
+                      widget.comicSource!,
+                      widget.settingsIndex,
+                    ))
+              as num)
+          .toDouble();
+
+  void _commit(double value) {
+    if (widget.comicId == null) {
+      appdata.settings[widget.settingsIndex] = value;
+    } else {
+      appdata.settings.setReaderSetting(
+        widget.comicId!,
+        widget.comicSource!,
+        widget.settingsIndex,
+        value,
+      );
+    }
+    appdata.saveData();
+    setState(() => _preview = null);
+    widget.onChanged?.call();
+  }
+
+  Future<void> _enterValue() async {
+    final factor = widget.displayScale;
+    await showInputDialog(
+      context: context,
+      title: widget.title,
+      initialValue: (_storedValue * factor).toStringAsFixed(
+        factor == 100 ? 0 : 2,
+      ),
+      hintText:
+          '${widget.min * factor} – ${widget.max * factor}${widget.suffix}',
+      onConfirm: (text) {
+        final entered = double.tryParse(text.trim());
+        if (entered == null ||
+            !entered.isFinite ||
+            entered < widget.min * factor ||
+            entered > widget.max * factor) {
+          return 'Enter a number in the displayed range'.tl;
+        }
+        final value = (entered / factor * 100).round() / 100;
+        if (mounted) _commit(value.clamp(widget.min, widget.max).toDouble());
+        return null;
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    var value =
-        (widget.comicId == null
-                ? appdata.settings[widget.settingsIndex]
-                : appdata.settings.getReaderSetting(
-                    widget.comicId!,
-                    widget.comicSource!,
-                  widget.settingsIndex,
-                ))
-            .toDouble();
+    final stored = _preview ?? _storedValue;
+    final value = stored.clamp(widget.min, widget.max).toDouble();
+    final label = widget.preciseInput
+        ? '${(stored * widget.displayScale).toStringAsFixed(widget.displayScale == 100 ? 0 : 2)}${widget.suffix}'
+        : stored.toString();
     return ListTile(
-      title: Text(
-        widget.title,
-        softWrap: true,
-        maxLines: 2,
-      ),
-      trailing: Text(value.toString(), style: ts.s12),
+      title: Text(widget.title, softWrap: true, maxLines: 2),
+      trailing: widget.preciseInput
+          ? TextButton(onPressed: _enterValue, child: Text(label))
+          : Text(label, style: ts.s12),
       subtitle: Slider(
         value: value,
-        onChanged: (value) {
-          if (value.toInt() == value) {
-            setState(() {
-              if (widget.comicId == null) {
-                appdata.settings[widget.settingsIndex] = value.toInt();
-              } else {
-                appdata.settings.setReaderSetting(
-                  widget.comicId!,
-                  widget.comicSource!,
-                  widget.settingsIndex,
-                  value.toInt(),
-                );
-              }
-              appdata.saveData();
-            });
-          } else {
-            setState(() {
-              if (widget.comicId == null) {
-                appdata.settings[widget.settingsIndex] = value;
-              } else {
-                appdata.settings.setReaderSetting(
-                  widget.comicId!,
-                  widget.comicSource!,
-                  widget.settingsIndex,
-                  value,
-                );
-              }
-              appdata.saveData();
-            });
-          }
-          widget.onChanged?.call();
-        },
-        divisions: ((widget.max - widget.min) / widget.interval).toInt(),
+        onChanged: widget.preciseInput
+            ? (value) => setState(() => _preview = value)
+            : _commit,
+        onChangeEnd: widget.preciseInput ? _commit : null,
+        divisions: ((widget.max - widget.min) / widget.interval).round(),
         min: widget.min,
         max: widget.max,
       ),
