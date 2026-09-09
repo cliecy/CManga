@@ -14,6 +14,8 @@ class _ReaderImagesState extends State<_ReaderImages> {
 
   late _ReaderState reader;
 
+  final _preloader = ReaderPreloader();
+
   void _onProcessingChanged() {
     if (mounted) setState(() {});
   }
@@ -29,8 +31,8 @@ class _ReaderImagesState extends State<_ReaderImages> {
   @override
   void dispose() {
     imageAiSettingsRevision.removeListener(_onProcessingChanged);
+    _preloader.dispose();
     super.dispose();
-    ImageDownloader.cancelAllLoadingImages();
   }
 
   /// Handle jumping to last page when _jumpToLastPageOnLoad is true
@@ -139,12 +141,14 @@ class _ReaderImagesState extends State<_ReaderImages> {
             ) ==
             true;
         return _GalleryMode(
+          preloader: _preloader,
           key: Key(
             '${reader.mode.key}_${reader.imagesPerPage}_${showComments}_${showCommentsAtEnd}_${imageAiSettingsRevision.value}',
           ),
         );
       } else {
         return _ContinuousMode(
+          preloader: _preloader,
           key: Key('${reader.mode.key}_${imageAiSettingsRevision.value}'),
         );
       }
@@ -153,7 +157,9 @@ class _ReaderImagesState extends State<_ReaderImages> {
 }
 
 class _GalleryMode extends StatefulWidget {
-  const _GalleryMode({super.key});
+  const _GalleryMode({super.key, required this.preloader});
+
+  final ReaderPreloader preloader;
 
   @override
   State<_GalleryMode> createState() => _GalleryModeState();
@@ -169,7 +175,7 @@ class _GalleryModeState extends State<_GalleryMode>
     'preloadImageCount',
   );
 
-  final _preloader = ReaderPreloader();
+  ReaderPreloader get _preloader => widget.preloader;
 
   void _onPreloadSettingsChanged() {
     if (mounted) cache(reader.page);
@@ -222,6 +228,16 @@ class _GalleryModeState extends State<_GalleryMode>
   @override
   void initState() {
     reader = context.reader;
+    _preloader.configure(
+      [
+        for (var page = 1; page <= reader.images!.length; page++)
+          _createImageProvider(page, context),
+      ],
+      initialPage: math.min(
+        getPageImagesRange(reader.page).$1 + 1,
+        reader.images!.length,
+      ),
+    );
     controller = PageController(initialPage: reader.page);
     reader._imageViewController = this;
     appdata.settings.addListener(_onPreloadSettingsChanged);
@@ -234,7 +250,6 @@ class _GalleryModeState extends State<_GalleryMode>
   @override
   void dispose() {
     appdata.settings.removeListener(_onPreloadSettingsChanged);
-    _preloader.dispose();
     controller.dispose();
     super.dispose();
   }
@@ -283,9 +298,7 @@ class _GalleryModeState extends State<_GalleryMode>
       }
     }
 
-    addPage(startPage + 1);
-    addPage(startPage - 1);
-    for (var page = startPage + 2; page <= startPage + preCacheCount; page++) {
+    for (var page = startPage; page <= startPage + preCacheCount; page++) {
       addPage(page);
     }
     _preloader.update(pages);
@@ -654,7 +667,9 @@ const Set<PointerDeviceKind> _kTouchLikeDeviceTypes = <PointerDeviceKind>{
 const double _kChangeChapterOffset = 160;
 
 class _ContinuousMode extends StatefulWidget {
-  const _ContinuousMode({super.key});
+  const _ContinuousMode({super.key, required this.preloader});
+
+  final ReaderPreloader preloader;
 
   @override
   State<_ContinuousMode> createState() => _ContinuousModeState();
@@ -682,7 +697,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
     'preloadImageCount',
   );
 
-  final _preloader = ReaderPreloader();
+  ReaderPreloader get _preloader => widget.preloader;
 
   void _onPreloadSettingsChanged() {
     if (mounted) cacheImages(reader.page);
@@ -713,6 +728,10 @@ class _ContinuousModeState extends State<_ContinuousMode>
   @override
   void initState() {
     reader = context.reader;
+    _preloader.configure([
+      for (var page = 1; page <= reader.images!.length; page++)
+        _createImageProvider(page, context),
+    ], initialPage: reader.page);
     reader._imageViewController = this;
     itemPositionsListener.itemPositions.addListener(onPositionChanged);
     appdata.settings.addListener(_onPreloadSettingsChanged);
@@ -726,16 +745,20 @@ class _ContinuousModeState extends State<_ContinuousMode>
   void dispose() {
     itemPositionsListener.itemPositions.removeListener(onPositionChanged);
     appdata.settings.removeListener(_onPreloadSettingsChanged);
-    _preloader.dispose();
     super.dispose();
   }
 
   void onPositionChanged() {
-    if (itemPositionsListener.itemPositions.value.isEmpty) {
-      return;
-    }
-    var page = itemPositionsListener.itemPositions.value.first.index;
-    page = page.clamp(1, reader.maxPage);
+    final visible = itemPositionsListener.itemPositions.value.where(
+      (position) =>
+          position.itemTrailingEdge > 0 &&
+          position.itemLeadingEdge < 1 &&
+          position.index >= 1 &&
+          position.index <= reader.maxPage,
+    );
+    if (visible.isEmpty) return;
+    // ItemPosition's iterable has no page-order contract.
+    final page = visible.map((position) => position.index).reduce(math.min);
     if (page != reader.page) {
       reader.setPage(page);
       context.readerScaffold.update();
@@ -804,7 +827,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
   void cacheImages(int current) {
     _preloader.update([
       for (
-        var page = current + 1;
+        var page = current;
         page <= math.min(reader.maxPage, current + preCacheCount);
         page++
       )

@@ -100,6 +100,16 @@ class _ReaderImageDetailsView extends StatelessWidget {
                                 color: Theme.of(context).colorScheme.error,
                               ),
                             ),
+                          _ReaderImageReprocessButton(
+                            provider: ReaderImageProvider(
+                              imageKey,
+                              sourceKey,
+                              cid,
+                              eid,
+                              index + 1,
+                            ),
+                            enabled: canNavigate,
+                          ),
                         ],
                       ),
                       childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),

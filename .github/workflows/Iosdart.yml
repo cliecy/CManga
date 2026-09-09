@@ -10,6 +10,20 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache pinned native Metal runtime
+        uses: actions/cache@v4
+        with:
+          path: build/apple-ort
+          key: apple-ort-ios-${{ runner.arch }}-${{ hashFiles('native/apple/build_ort_metal.py', 'native/apple/ort-metal.patch', 'native/apple/VeneraOnnxRuntime.podspec') }}
+
+      - name: Build device and simulator Metal runtime slices
+        run: python3 native/apple/build_ort_metal.py --platform ios
       
       - name: Set up Flutter
         uses: subosito/flutter-action@v2

@@ -34,14 +34,15 @@ Cartoon embedded text translation function**
 - **最终输出倍率**默认跟随模型，也可在 1× 至模型原生倍率之间设置：滑块步进 0.05×，数字输入精度 0.01×，例如 1.30×、1.75×。结果尺寸按进入超分阶段的原图尺寸四舍五入。
 - **超分强度**为 0–100%，步进 1%。0% 仅做基础缩放，100% 使用完整增强结果；它不改变倍率，也不是高级设置中的“输出对比度”。v1 同样支持独立强度。
 - 在“设置 → 上色”先选择模型，再下载或导入该模型契约兼容的 ONNX；各模型独立安装、替换、恢复和删除，不是任意 ONNX 自动识别器。**颜色浓度**独立控制 0–120%，步进 1%；100% 为模型预测色度，120% 额外增艳。0% 生成中性色度，不保证逐字节还原原图；关闭功能才完全跳过上色。
-- Windows 的 **Auto** 优先尝试 DirectML，模型或设备不兼容时明确报告同一模型的 CPU 回退；也可指定 CPU。Android 超分 Auto 尝试 NNAPI 后回退 CPU，上色使用 CPU。macOS / iOS 的 Auto 和 CPU 均使用真实 ONNX Runtime CPU 推理，不宣称 CoreML、Metal 或 GPU 加速。后端可用不等于每个模型、每个算子均在 GPU 运行。
+- Windows 的 **Auto** 优先尝试 DirectML，模型或设备不兼容时明确报告同一模型的 CPU 回退；也可指定 CPU。Android 超分 Auto 尝试 NNAPI 后回退 CPU，上色使用 CPU。**macOS / iOS 只允许 ONNX Runtime WebGPU → Dawn → Metal 硬件 GPU 推理**，同时禁用 CPU 算子回退；旧 Auto / CPU 设置统一按 Metal 解析。无兼容 GPU 或模型算子覆盖不完整时明确失败，不静默改用 CPU。
 - 两项功能同时开启时顺序为“超分 → 上色”。全局和漫画专属设置遵循现有优先级；调参后刷新当前图片。基础推理结果有界缓存，缓存仍在时，纯倍率/强度/对比度调整不重复执行对应模型；上游像素变化会正确重算下游上色。
-- **完整 AI 预加载**按当前阅读模式和预加载数量维护滚动窗口：后台页也会走完“超分 → 上色”，不再只下载原图。单个后台任务逐页处理，翻页复用已完成的阶段缓存；换模型或参数后重新处理受影响页面。缓存有容量限制，尚未完成或已被淘汰的页面仍需等待，不承诺所有页面即时显示或多模型同时占满 GPU。
+- **完整 AI 预加载**按章节页码顺序执行“超分 → 上色”，可见页与后台页共用同一串行队列。滚动增加需求，不丢弃中间页面，也不再因等待超过 16 项而拒绝页面；失败页会阻塞后续页，手动重试成功后继续。连续模式不需要退出漫画再进入来恢复。换章节或设置时，旧任务不能覆盖新一代页面状态。
+- **处理结果跨阅读会话和应用重启复用**：PNG 与完整性元数据保存在应用支持目录，按输入内容、模型和处理参数区分，统一采用 2 GiB LRU 上限。缓存损坏、参数变化或结果被淘汰时重新计算；未完成结果不会冒充成功缓存。不在内存里保留整章全部位图。
 - 阅读侧栏可直接展开**超分模型（AI v4）/ 上色模型**，选择、下载或导入模型，无需离开漫画。模型选择为全局设置，即使启用了漫画独立参数也对所有漫画生效；选择超分模型不会自动打开超分或把 v1 改成 v4。
 - **模型下载进度跨页面持续显示**：关闭设置后阅读器仍显示模型、实际字节数和百分比，重新打开设置继续观察同一任务；总大小未知时显示不定进度。下载、SHA 校验和原生安装分别报告，失败保留原因且不破坏原有可用模型。此保证针对应用运行期间切换页面，不代表退出程序后继续下载或自动断点恢复。
-- 四端提供同一模型集合、独立超分强度/颜色浓度、倍率控制、预加载、下载进度和逐页诊断；Linux 保持原生 AI 不支持。失败时保留可阅读图片并提示原因，不显示虚假的 AI 成功。Windows / macOS 单阶段输入及模型原生输出上限为 24×1024×1024 像素；iOS 为 4×1024×1024 像素，另有更小的队列、缓存和模型内存检查，超限明确报错而非擅自降低倍率。iOS 进入后台或收到内存警告时取消待处理任务并释放会话，回到前台后按需重建。
-- Windows 发布包携带 AI 运行库；Android 使用随包原生依赖；Apple 通过 CocoaPods 链接固定 ONNX Runtime 1.22.0 与校验 SHA-256 的 OpenCV 4.11.0 XCFramework，复用 `native/image_ai/` 中的 Windows 推理核心。不需要 Python、CUDA 或用户手工安装推理库。上色模型不随包分发，首次下载/导入后可离线使用。
-- **Apple 最低版本调整为 macOS 13.3 / iOS 15.1**，与官方 ONNX Runtime Apple 包要求一致。iOS 导入使用系统文件选择器的沙盒副本，再校验并安装 ONNX；iPad 分享提供弹出位置，避免处理图片分享时报错。
+- 四端提供同一模型集合、独立超分强度/颜色浓度、倍率控制、预加载、下载进度和逐页诊断，但 Apple 的模型兼容性受纯 GPU 算子覆盖约束，见下文。Linux 保持原生 AI 不支持。原生 AI 不再固定限制为 Windows / macOS 24MP、iOS 4MP：解码前及处理阶段按实时内存余量、图像尺寸和模型原生输出估算工作集，同时保留整数溢出和底层图像寻址限制。资源不足时简要提示“这部漫画的图片过大，不推荐开启超分”，技术原因放在逐页详情，不擅自降低倍率；屏幕刷新率不参与容量判断。iOS 后台或内存警告会取消待处理任务并释放会话。
+- Windows 发布包携带 AI 运行库；Android 使用随包原生依赖；Apple 使用固定源码版本的 **ONNX Runtime 1.29.0 / Dawn Metal** 与校验 SHA-256 的 **OpenCV 4.11.0** XCFramework，复用 `native/image_ai/` 推理核心。Apple 构建机需要 Python 和完整 Xcode 来生成运行库，但最终用户不需要 Python、CUDA 或手工安装推理库。上色模型不随包分发，首次下载/导入后可离线使用。
+- **Apple 最低版本为 macOS 13.3 / iOS 15.1**，还需兼容的 Metal 硬件和模型算子。iOS 导入使用系统文件选择器的沙盒副本，再校验并安装 ONNX；iPad 分享提供弹出位置。
 
 #### 上色模型与来源
 
@@ -53,6 +54,8 @@ Cartoon embedded text translation function**
 | Manga Light Colorizer V6 (`manga_light`) | 约 191 MB；512×512 灰度，`v6_generator.onnx`，generator-only | [sharky172 固定版本](https://huggingface.co/sharky172/manga-light-colorizer/tree/2fb022c4ce55632b7671a1df306f63984928e36a)，CC BY-NC-SA 4.0：署名、仅非商业、衍生作品同许可；下载前须确认，导入也须遵守许可。原有 Manga Light 选项已经使用此 V6 权重，本次明确版本名称，不重复下载同一模型。SAM 特征和 WD14 嵌入填零，**不运行分割或标签语义引导**，不等同完整上游管线。 |
 | Manga Colorization v2 (`manga_v2`) | 约 61 MB；五通道输入，提示/掩码置零，长边适配 512 并补齐至 32 的倍数 | **仅本地导入，无内置下载**。[Faridzar ONNX](https://huggingface.co/Faridzar/manga-colorization-v2-onnx) 标注 MIT，但 [qweasdd 上游权重](https://github.com/qweasdd/manga-colorization-v2) 许可未核实，商业使用及再分发未获澄清。 |
 
+**Apple Metal 兼容性实测**：ACNet、轻量动画 Real-ESRGAN、RealESRGAN-x2plus / x4plus、标准 DeOldify、AnimeColorDeOldify、Manga Colorization v2 可以执行。当前提供的 DeOldify int8、DDColor、Manga Light V6 导出无法完全分配给 WebGPU，因禁止 CPU 回退而明确拒绝；同名模型的其他导出不能据此推断兼容。这个 Metal 限制不适用于 Android / Windows 的 CPU 路径。
+
 文件体积不是运行内存需求：模型会话、激活、原生倍率输出和图像缓存还会占用 RAM/显存，DDColor 尤其重；4× 超分原生输出有 16 倍像素，即使最终选较小倍率，也不能据此假定推理内存同步降低。超限会明确失败，建议低内存设备先用 ACNet 或较轻模型。Pix2Pix 缺少已核实的官方训练权重，未实现为可用模型选项。
 
 超分来源：[Anime4KCPP / ACNet](https://github.com/TianZerL/Anime4KCPP)、[Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN)、[SceneWorks 固定版本 ONNX](https://huggingface.co/SceneWorks/real-esrgan-onnx/tree/09f741bac80a246b407da3ee902bf5f3291b602f)。Real-ESRGAN 为 BSD-3-Clause，分发时保留版权、许可与免责声明。设置页展示各模型的来源、许可及输入输出要求；改文件名不能转换模型协议。
@@ -63,15 +66,15 @@ Cartoon embedded text translation function**
 - 对本地/已下载的 `file://` 源页，成功的处理阶段自动在源页同级的隐藏分类目录 `.venera-processed/` 中保存 PNG：`super_resolution`（超分）、`colorization`（仅成功上色）、`super_resolution_colorization`（超分后上色）。下层按原文件名和结果内容哈希组织，同一结果复用、不同结果并存；**不覆盖原图或旧结果**。两阶段均成功时保留超分中间图与最终组合图。写入失败在逐页信息中记录，不妨碍阅读，也不声称保存成功；在线页不会自动写到漫画目录。
 - 隐藏处理目录不会作为源页/章节重新扫描，避免重复处理或污染导入。普通漫画下载仍保留原始页面，不会自动把整本书替换为 AI 结果。
 - 用户明确选择 **CBZ / EPUB / PDF 整书导出**时，按当前全局/漫画专属设置处理已下载章节及封面，再从临时输出生成文件；不要求先逐页翻阅，不打包 `.venera-processed` 的历史版本。任一启用阶段失败则终止导出，不静默混入原图。
-- 阅读器“图像信息”列出当前章节每页并支持跳转，突出当前可见页。记录实际解码的原始尺寸、超分前后尺寸、最终尺寸/编码大小，以及每阶段状态、实际后端、缓存/执行信息、耗时、错误和本地结果路径。尚未加载、处理中、失败/不完整、取消及旧设置待刷新会分别标示；不会把请求倍率推算值或别页的最近操作当成本页实测结果。
+- 阅读器“图像信息”列出当前章节每页并支持跳转，突出当前可见页。**每页都有“重新处理”按钮**：仅该页绕过处理缓存并重新推理，仍遵守前页失败屏障，不清空其他页面的结果。连续模式中，失败页和等待它的页面也提供原地重试入口。详情记录实际尺寸、每阶段状态、后端、缓存/执行信息、耗时、错误和本地结果路径；未加载、处理中、失败、取消及旧设置分别标示，不把请求值或别页操作当成本页实测结果。
 
-验证边界：共享 Dart 回归测试 21 项通过。macOS ARM64 使用与应用相同的 ONNX Runtime 1.22.0 / OpenCV 4.11.0 Apple 框架，对全部 10 个模型选项完成真实 CPU 推理、参数重渲染及缓存检查；透明度、强度端点和线性光混合也有独立检查。
+2.1.6 验证边界：共享 Dart 回归测试 28 项通过，包括 20 页有序需求、失败屏障、重试、过期任务丢弃和缓存完整性。macOS ARM64 Apple M2 使用固定的 ONNX Runtime 1.29.0 Metal / OpenCV 4.11.0 框架完成上述 7 个兼容模型的真实 GPU 推理、参数重渲染和缓存检查；其余 3 个模型按纯 GPU 策略拒绝，未转 CPU。
 
-完整应用已在 macOS 本机、Android 35 ARM64 平板模拟器和 iOS 27 iPhone 17 Pro 模拟器通过 CPU 路径验收：真实 V6 下载与 SHA-256 校验、离开设置页后继续下载、有效模型导入及无效替换保护、五页完整 AI 预加载、倍率/强度重渲染、逐页信息界面、CBZ / EPUB / PDF 严格导出、原图保护和缺模型时拒绝导出。验收图像由 127×129 按 1.30× 输出为 165×168，1.75× 输出为 222×226。
+Android 35 ARM64 平板模拟器的实际应用已验证连续阅读：第 2 页故意损坏时，滚动到第 11 页仍等待第 2 页；修复源文件并点击原地重试后，第 11 页无需退出漫画即可显示。已生成全部 20 页的“超分 → 上色”结果，并验证完成页手动重新推理、杀死进程后重新打开命中磁盘缓存。256×384 测试页以 1.30× 输出为 333×499。验收还发现并修复了已用内存重复扣减导致的小图误拒绝。
 
-三端原生文件交互也已验收：保存面板产物与处理后的 PNG 逐字节一致；系统分享面板可正常显示并取消（未向外发送）；文件选择器可导入大写 `.ONNX` 扩展名的模型，并通过原生模型验证及 SHA-256 检查。iOS 另验证了目录选择与安全作用域释放，以及关闭选择器后的再次导入。
+原生 Metal 检查另确认强制重处理会重新推理、随后可再次命中缓存，并拒绝显式 CPU 请求。2600 万像素 PNG 在当时的设备内存余量下通过头部资源预检，越界尺寸被拒绝；这不承诺任意大图、模型或倍率都能完成推理。
 
-这些检查不是画质评测、性能承诺或所有图片/设备的保证；Android / iOS 真机、旧系统版本、Android NNAPI 和 Windows DirectML 没有据此获得运行验证。Windows 目标机测试按本次验收范围跳过，Linux 不在此次功能升级范围。CI 包含 iOS 模拟器和无签名设备构建、macOS 构建及原生 smoke。
+这些检查不是画质评测、性能承诺或所有图片/设备的保证。Android / iOS 真机、旧系统、Android NNAPI 和 Windows DirectML 没有据此获得本次运行验证；Apple M2 原生 smoke 也不能代替其他 Apple 设备验收。CI 包含四端构建、iOS 模拟器及无签名设备构建、macOS 原生 Metal smoke；没有硬件 GPU 的 CI 机器只能证明构建及明确的不可用诊断。Linux 不在本次发布范围。
 
 ## 界面展示 (Screenshots)
 
@@ -124,7 +127,7 @@ build/ai-smoke/Release/venera_image_ai_smoke.exe --model assets/models/anime4k_a
 
 smoke 输出实际后端、输出尺寸、推理次数、缓存命中和峰值内存；`--check-strength true` 额外验证 50% 是 0% 与 100% 的线性光中间结果且透明度不变，`--backend auto` 可在有兼容 GPU 的 Windows 机器验证 DirectML。交叉编译成功不代表目标设备运行验证。
 
-Apple 应用构建需要 Flutter 3.41.2 或更新版本、完整 Xcode、对应 SDK 和 CocoaPods；仅安装 Command Line Tools 不足以构建 Flutter 应用。iOS 使用 UIScene 生命周期注册插件和创建原生通道，并锁定已支持 UIScene 的文件选择插件，避免旧 `AppDelegate.window` 路径导致模型导入失败。`ios/Podfile` 与 `macos/Podfile` 自动接入同一原生 AI 模块，不需要手动复制源码或修改生成的插件注册文件：
+Apple 应用构建需要 Flutter 3.41.2 或更新版本、Python 3、Git、完整 Xcode、对应 SDK 和 CocoaPods；仅安装 Command Line Tools 不足。`ios/Podfile` 与 `macos/Podfile` 自动调用 `native/apple/build_ort_metal.py`，从固定提交构建并缓存硬件 Metal 运行库，首次需要下载源码及编译。iOS 使用 UIScene 生命周期注册原生通道，并锁定已支持 UIScene 的文件选择插件；无需手动复制源码或修改生成的插件注册文件：
 
 ```sh
 flutter pub get
@@ -133,16 +136,16 @@ flutter build ios --simulator --debug
 flutter build ios --release --no-codesign
 ```
 
-无签名 iOS 构建产物仍须通过自己的合法签名/分发方式安装。macOS 独立推理 smoke 可在 Command Line Tools 环境运行：
+无签名 iOS 构建产物仍须通过自己的合法签名/分发方式安装。macOS 独立推理 smoke 同样需要完整 Xcode 来构建固定的 Metal 运行库：
 
 ```sh
-brew install cmake opencv onnxruntime
+brew install cmake opencv
 cmake -S native/image_ai -B build/ai-smoke -DCMAKE_BUILD_TYPE=Release
 cmake --build build/ai-smoke --parallel 2
-build/ai-smoke/venera_image_ai_smoke --model assets/models/anime4k_acnet.onnx --image screenshots/colorization_before.jpg --output build/ai-smoke/result.png --type esrgan --backend auto --scale 1.3 --renders 3 --check-strength true
+build/ai-smoke/venera_image_ai_smoke --model assets/models/anime4k_acnet.onnx --image screenshots/colorization_before.jpg --output build/ai-smoke/result.png --type esrgan --backend metal --scale 1.3 --renders 3 --check-strength true
 ```
 
-该独立 CMake 目标默认使用主机安装的库，不替代应用的固定 CocoaPods 依赖。复现固定版本时，可通过 `ORT_INCLUDE_DIR` / `ORT_LIBRARY` 指向官方 Apple 包头文件/框架，通过 `OpenCV_DIR` 选择相应 OpenCV 安装；应用框架的直接编译/链接验证与主机库 smoke 应分别记录。
+该独立 CMake 目标固定使用应用的 Metal ORT，但 OpenCV 默认来自主机开发库；应用的 CocoaPods OpenCV 则固定为 4.11.0。两种 OpenCV 链接方式的验证应分别记录，不能用 Homebrew 或公共 CocoaPods 的 CPU-only ONNX Runtime 替代硬件 Metal 框架。
 
 ## Create a new comic source
 See [Comic Source](doc/comic_source.md)

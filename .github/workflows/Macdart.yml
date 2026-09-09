@@ -10,6 +10,20 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache pinned native Metal runtime
+        uses: actions/cache@v4
+        with:
+          path: build/apple-ort
+          key: apple-ort-macos-${{ runner.arch }}-${{ hashFiles('native/apple/build_ort_metal.py', 'native/apple/ort-metal.patch', 'native/apple/VeneraOnnxRuntime.podspec') }}
+
+      - name: Build native ONNX WebGPU Metal dependency
+        run: python3 native/apple/build_ort_metal.py --platform macos
       
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -29,11 +43,11 @@ jobs:
 
       - name: Build native AI smoke
         run: |
-          brew install cmake onnxruntime opencv
+          brew install cmake opencv
           cmake -S native/image_ai -B build/ai-smoke -DCMAKE_BUILD_TYPE=Release
           cmake --build build/ai-smoke --parallel 2
 
-      - name: Exercise ACNet CPU, fractional scaling and cached renders
+      - name: Exercise Metal-only ACNet and cached renders
         run: |
           python3 - <<'PY'
           import json
@@ -55,28 +69,44 @@ jobs:
           image.write_bytes(b"\x89PNG\r\n\x1a\n"
               + chunk(b"IHDR", struct.pack(">IIBBBBB", 19, 13, 8, 6, 0, 0, 0))
               + chunk(b"IDAT", zlib.compress(pixels)) + chunk(b"IEND", b""))
-          for backend in ("cpu", "auto"):
+          for backend in ("metal", "auto"):
               result = subprocess.run([
                   "build/ai-smoke/venera_image_ai_smoke",
                   "--model", "assets/models/anime4k_acnet.onnx",
                   "--image", str(image), "--output", str(output / f"{backend}.png"),
                   "--type", "esrgan", "--backend", backend, "--scale", "1.3",
                   "--renders", "3", "--check-strength", "true",
-              ], check=True, text=True, capture_output=True)
+              ], text=True, capture_output=True)
+              (output / f"{backend}.stderr").write_text(result.stderr)
+              if result.returncode:
+                  errors = [json.loads(line) for line in result.stderr.splitlines()
+                      if line.startswith('{"error":')]
+                  no_hardware = (
+                      "Failed to get a WebGPU adapter",
+                      "Venera rejects non-Metal and software/CPU adapters.",
+                  )
+                  if (errors and errors[-1]["error"] == "backend_unavailable"
+                          and any(reason in errors[-1]["message"] for reason in no_hardware)):
+                      # Hosted virtual Macs may expose no physical Metal GPU.
+                      # This proves fail-closed behavior, NOT successful GPU inference.
+                      (output / "gpu-unavailable.json").write_text(json.dumps(errors[-1]))
+                      print("No Metal GPU on this runner; GPU inference was not exercised.")
+                      break
+                  raise RuntimeError(result.stderr)
               (output / f"{backend}.jsonl").write_text(result.stdout)
               print(result.stdout)
               rows = [json.loads(line) for line in result.stdout.splitlines()]
               assert len(rows) == 3 and rows[0]["inferenceRuns"] > 0
               assert all((row["width"], row["height"]) == (25, 17) for row in rows)
-              assert all(row["backend"] == "cpu" and not row["fallbackReason"] for row in rows)
+              assert all(row["backend"] == "metal" and not row["fallbackReason"] for row in rows)
               assert all(row["cacheHit"] and row["inferenceRuns"] == 0 for row in rows[1:])
           PY
 
-      - name: Upload native CPU smoke evidence
+      - name: Upload native Metal smoke evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: macOS-CPU-AI-smoke
+          name: macOS-Metal-AI-smoke
           path: build/ai-smoke-results/
           if-no-files-found: warn
 

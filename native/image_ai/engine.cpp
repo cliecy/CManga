@@ -1,4 +1,5 @@
 #include "engine.h"
+#include "image_memory.h"
 
 #include <onnxruntime_c_api.h>
 #include <opencv2/core.hpp>
@@ -17,6 +18,7 @@
 
 #ifdef __APPLE__
 #include <TargetConditionals.h>
+#include "../apple/metal_provider.h"
 #if TARGET_OS_IOS
 #include <os/proc.h>
 #endif
@@ -35,13 +37,9 @@ namespace {
 #if defined(__APPLE__) && TARGET_OS_IOS
 // Bound image working sets separately from model weights on mobile devices.
 constexpr size_t kCacheBytes = 24u * 1024u * 1024u;
-constexpr int64_t kMaxPixels = 4ll * 1024 * 1024;
-constexpr size_t kMaxEncodedBytes = 16u * 1024u * 1024u;
 constexpr size_t kMaxSessions = 1;
 #else
 constexpr size_t kCacheBytes = 128u * 1024u * 1024u;
-constexpr int64_t kMaxPixels = 24ll * 1024 * 1024;
-constexpr size_t kMaxEncodedBytes = 64u * 1024u * 1024u;
 constexpr size_t kMaxSessions = 2;
 #endif
 constexpr int kTile = 256;
@@ -74,11 +72,7 @@ template <typename T> struct OrtOwner {
 };
 
 void Pixels(int64_t width, int64_t height) {
-  if (width < 1 || height < 1 || width > kMaxPixels || height > kMaxPixels ||
-      width * height > kMaxPixels) {
-    throw Error("image_too_large", "AI image exceeds the " + std::to_string(kMaxPixels / (1024 * 1024)) +
-        " megapixel memory limit; choose a smaller input or model. Native inference is never silently downscaled.");
-  }
+  ValidateImageDimensions(width, height);
 }
 
 std::filesystem::path Path(const std::string& text) {
@@ -144,7 +138,7 @@ struct Runtime {
 #else
         api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
 #endif
-        if (!api) throw Error("backend_unavailable", "CPU ONNX Runtime API version does not match this application.");
+        if (!api) throw Error("backend_unavailable", "ONNX Runtime API version does not match this application.");
       }
       Check(api, api->CreateEnv(ORT_LOGGING_LEVEL_WARNING, "venera_image_ai", &env));
     } catch (...) {
@@ -187,6 +181,10 @@ struct Session {
     auto api = runtime.api;
     OrtOwner<OrtSessionOptions> options(nullptr, api->ReleaseSessionOptions);
     Check(api, api->CreateSessionOptions(&options.ptr));
+#ifdef __APPLE__
+    backend = "metal";
+    AppendAppleMetalProvider(api, options.ptr);
+#endif
     Check(api, api->SetSessionGraphOptimizationLevel(options.ptr, ORT_ENABLE_ALL));
 #if defined(__APPLE__) && TARGET_OS_IOS
     Check(api, api->SetIntraOpNumThreads(options.ptr, 2));
@@ -362,11 +360,13 @@ struct Decoded {
 };
 
 Decoded Decode(const std::vector<uint8_t>& bytes) {
-  if (bytes.empty() || bytes.size() > kMaxEncodedBytes) throw Error("invalid_image",
-      "Encoded image must be between 1 byte and " + std::to_string(kMaxEncodedBytes / (1024 * 1024)) + " MiB.");
+  const auto expected_pixels = ValidateEncodedImage(bytes.data(), bytes.size());
   cv::Mat image = cv::imdecode(bytes, cv::IMREAD_UNCHANGED);
   if (image.empty()) throw Error("invalid_image", "Image could not be decoded.");
   Pixels(image.cols, image.rows);
+  if (image.total() > expected_pixels) {
+    throw Error("invalid_image", "Decoded image is larger than its inspected header.");
+  }
   if (image.depth() == CV_16U) image.convertTo(image, CV_8U, 1.0 / 257.0);
   if (image.depth() != CV_8U) throw Error("invalid_image", "Only 8-bit and 16-bit images are supported.");
   Decoded result;
@@ -452,7 +452,6 @@ std::string KeyPart(const std::string& text) {
 }  // namespace
 
 struct Engine::Impl {
-  std::unique_ptr<Runtime> cpu;
   std::unique_ptr<Runtime> directml;
   std::string dml_error;
   bool dml_checked = false;
@@ -483,9 +482,11 @@ struct Engine::Impl {
   void CheckCancelled() {
     if (cancelled.load()) throw Error("cancelled", "Image AI processing was cancelled.");
   }
-  Runtime& Cpu() {
-    if (!cpu) cpu = std::make_unique<Runtime>(false);
-    return *cpu;
+  Runtime& DefaultRuntime() {
+    // The Apple Metal context survives reader/background engine recreation.
+    // Keep its ORT logger/environment alive for the same process lifetime.
+    static Runtime runtime(false);
+    return runtime;
   }
   Runtime& Dml() {
     if (!directml && !dml_checked) {
@@ -508,6 +509,15 @@ struct Engine::Impl {
       throw Error("incompatible_model", model.type + ": prepared input does not match the graph's float32 NCHW shape.");
     }
     const size_t plane = input.total();
+    // Include tensor staging/readback and a worst-case scale while probing a
+    // dynamic legacy SR graph. Default tiles stay bounded independently of
+    // the full image, including fixed-size imported models.
+    const int scale = model.type == "esrgan"
+        ? (model.validated ? model.info.scale : 8) : 1;
+    Pixels(static_cast<int64_t>(input.cols) * scale,
+           static_cast<int64_t>(input.rows) * scale);
+    const uint64_t output_pixels = plane * scale * scale;
+    ValidateImageWorkingSet(plane, output_pixels, output_pixels);
     float* input_data = nullptr;
     if (channels == 1 && input.isContinuous()) {
       // ORT reads this borrowed tensor synchronously; single-channel inputs
@@ -609,7 +619,11 @@ struct Engine::Impl {
                       const std::string& model_id, bool dml) {
     CheckType(type);
     const std::string file_identity = KeyPart(FileIdentity(path));
+#ifdef __APPLE__
+    const std::string suffix = KeyPart(type) + "metal";
+#else
     const std::string suffix = KeyPart(type) + (dml ? "dml" : "cpu");
+#endif
     const std::string metadata_identity = file_identity + KeyPart(type);
     const std::string identity = file_identity + KeyPart(model_id) + suffix;
     const std::string inspected_identity = file_identity + KeyPart("") + suffix;
@@ -622,7 +636,7 @@ struct Engine::Impl {
     }
     // Release before opening another large model, not after its peak allocation.
     while (sessions.size() >= kMaxSessions) sessions.pop_back();
-    auto session = std::make_unique<Session>(dml ? Dml() : Cpu(), path, type, identity, dml);
+    auto session = std::make_unique<Session>(dml ? Dml() : DefaultRuntime(), path, type, identity, dml);
     for (const auto& entry : metadata) {
       if (entry.identity == metadata_identity) {
         session->info = entry.info;
@@ -794,6 +808,16 @@ struct Engine::Impl {
 
   Base Infer(const Request& request, const Decoded& image, bool dml) {
     auto& session = GetSession(request.model_path, request.type, request.model_id, dml);
+    const auto input_pixels = image.bgr.total();
+    const auto native_pixels = request.type == "esrgan"
+        ? input_pixels * session.info.scale * session.info.scale : input_pixels;
+    const double scale = request.type == "esrgan"
+        ? (request.output_scale == 0 ? session.info.scale : request.output_scale) : 1;
+    const auto output_width = std::llround(image.bgr.cols * scale);
+    const auto output_height = std::llround(image.bgr.rows * scale);
+    Pixels(output_width, output_height);
+    ValidateImageWorkingSet(input_pixels, native_pixels,
+        static_cast<uint64_t>(output_width) * output_height);
     Base base;
     base.path = request.model_path;
     base.backend = session.backend;
@@ -881,7 +905,14 @@ Engine::~Engine() = default;
 
 Capabilities Engine::GetCapabilities() {
   Capabilities result;
-  try { impl_->Cpu(); }
+  try {
+    impl_->DefaultRuntime();
+#ifdef __APPLE__
+    std::string reason;
+    if (!AppleMetalAvailable(&reason)) throw Error("backend_unavailable", reason);
+    result.backends = {"metal"};
+#endif
+  }
   catch (const std::exception& error) {
     result.supported = false;
     result.types.clear();
@@ -914,7 +945,14 @@ Result Engine::Process(const Request& request) {
   const bool prefer_dml = false;
 #endif
   CheckType(request.type);
+#ifdef __APPLE__
+  if (request.backend != "auto" && request.backend != "metal")
+    throw Error("invalid_arguments", "Apple AI requires Metal; CPU neural inference is disabled.");
+  const char* default_backend = "metal";
+#else
   if (request.backend != "auto" && request.backend != "cpu") throw Error("invalid_arguments", "backend must be auto or cpu.");
+  const char* default_backend = "cpu";
+#endif
   if (!std::isfinite(request.intensity) || !std::isfinite(request.strength) || !std::isfinite(request.output_scale) ||
       request.intensity < (request.type == "esrgan" ? .3 : 0) || request.intensity > 1.2 ||
       request.strength < 0 || request.strength > 1 || request.output_scale < 0 || request.output_scale > 8) {
@@ -930,7 +968,7 @@ Result Engine::Process(const Request& request) {
   bool hit = false;
   if (!bypass) {
     for (auto it = impl_->cache.begin(); it != impl_->cache.end(); ++it) {
-      if (it->key == key && (!prefer_dml ? it->backend == "cpu"
+      if (!request.force_reprocess && it->key == key && (!prefer_dml ? it->backend == default_backend
           : (it->backend == "directml" || !it->reason.empty()))) {
         impl_->cache.splice(impl_->cache.begin(), impl_->cache, it);
         base = &impl_->cache.front();
@@ -956,6 +994,14 @@ Result Engine::Process(const Request& request) {
   ModelInfo info;
   if (base) info = base->info;
   else if (request.type == "esrgan") info = impl_->Info(request.model_path, request.type);
+  const double output_scale = request.type == "esrgan"
+      ? (request.output_scale == 0 ? info.scale : request.output_scale) : 1;
+  const auto output_width = std::llround(image.bgr.cols * output_scale);
+  const auto output_height = std::llround(image.bgr.rows * output_scale);
+  Pixels(output_width, output_height);
+  const uint64_t output_pixels = static_cast<uint64_t>(output_width) * output_height;
+  ValidateImageWorkingSet(image.bgr.total(), 0,
+      std::max<uint64_t>(output_pixels, base ? base->pixels.total() : 0));
   Result result;
   result.backend = bypass ? "none" : base->backend;
   result.scale = info.scale;
@@ -969,6 +1015,12 @@ Result Engine::Process(const Request& request) {
   result.image_bytes = Encode(rendered, alpha);
   result.inference_runs = impl_->inference_runs - runs_before;
   if (base == &computed && computed.Bytes() <= kCacheBytes) {
+    for (auto it = impl_->cache.begin(); it != impl_->cache.end();) {
+      if (it->key == computed.key && it->backend == computed.backend) {
+        impl_->cache_bytes -= it->Bytes();
+        it = impl_->cache.erase(it);
+      } else ++it;
+    }
     while (!impl_->cache.empty() && impl_->cache_bytes + computed.Bytes() > kCacheBytes) {
       impl_->cache_bytes -= impl_->cache.back().Bytes();
       impl_->cache.pop_back();

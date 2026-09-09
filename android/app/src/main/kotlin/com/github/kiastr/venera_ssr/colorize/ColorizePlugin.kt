@@ -47,7 +47,7 @@ class ColorizePlugin private constructor(context: Context, private val channel: 
     private fun getEngine(): ColorizeEngine {
         engine?.let { return it }
         check(OpenCVLoader.initDebug()) { "OpenCV native libraries failed to load" }
-        return ColorizeEngine(File(context.cacheDir, "image_ai_profiles")).also { engine = it }
+        return ColorizeEngine(File(context.cacheDir, "image_ai_profiles"), context).also { engine = it }
     }
 
     private fun attachLifecycle(activity: Activity) {
@@ -97,6 +97,8 @@ class ColorizePlugin private constructor(context: Context, private val channel: 
                     reply { result.success(value) }
                 } catch (e: Throwable) {
                     val code = when {
+                        e is ImageResourceException -> e.code
+                        e is OutOfMemoryError -> "memory_limit"
                         call.method == "copyUri" -> "COPY_FAILED"
                         call.method == "getModelInfo" -> "INCOMPATIBLE_MODEL"
                         e is IllegalArgumentException || e is ClassCastException -> "BAD_ARGS"
@@ -142,19 +144,22 @@ class ColorizePlugin private constructor(context: Context, private val channel: 
         val intensity = number(call, "intensity", 1.0).toFloat()
         val strength = number(call, "strength", 1.0).toFloat()
         val outputScale = number(call, "outputScale", 0.0)
+        val forceReprocess = call.argument<Boolean>("forceReprocess") ?: false
         // Decode bounds before allocating; compressed images can otherwise exhaust the heap.
         val bounds = BitmapFactory.Options().also { it.inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-        require(bounds.outWidth > 0 && bounds.outHeight > 0 &&
-            bounds.outWidth.toLong() * bounds.outHeight <= 24L * 1024 * 1024) {
-            "Image is invalid or exceeds the 24-megapixel Android decode limit"
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            throw ImageResourceException("invalid_image", "Cannot read input image dimensions")
         }
+        val processor = getEngine()
+        processor.validateImage(bounds.outWidth, bounds.outHeight, path, modelId, inputId,
+            type, backend, intensity, strength, outputScale, forceReprocess)
         val options = BitmapFactory.Options().also { it.inPreferredConfig = Bitmap.Config.ARGB_8888 }
         val input = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
-            ?: throw IllegalArgumentException("Cannot decode input image")
+            ?: throw ImageResourceException("invalid_image", "Cannot decode input image")
         try {
-            val output = getEngine().colorize(input, path, modelId, inputId, type, backend,
-                intensity, strength, outputScale)
+            val output = processor.colorize(input, path, modelId, inputId, type, backend,
+                intensity, strength, outputScale, forceReprocess)
             try {
                 val encoded = ByteArrayOutputStream()
                 check(output.bitmap.compress(Bitmap.CompressFormat.PNG, 100, encoded)) { "PNG encoding failed" }

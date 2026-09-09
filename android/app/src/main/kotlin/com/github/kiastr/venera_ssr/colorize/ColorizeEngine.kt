@@ -5,7 +5,10 @@ import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import ai.onnxruntime.TensorInfo
+import android.app.ActivityManager
+import android.content.Context
 import android.graphics.Bitmap
+import android.os.Build
 import org.opencv.core.Core
 import org.opencv.core.CvType
 import org.opencv.core.Mat
@@ -18,11 +21,62 @@ import java.io.File
 import java.nio.FloatBuffer
 import java.security.MessageDigest
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
+
+internal class ImageResourceException(val code: String, message: String) : RuntimeException(message)
+
+/** Native allocations and Java arrays have different limits on Android. */
+internal class ImageMemoryPolicy(context: Context) {
+    private val activity = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+
+    fun dimensions(width: Long, height: Long): Long {
+        // Bitmap byte counts, OpenCV dimensions and Java row arrays use signed int.
+        if (width <= 0 || height <= 0 || width > Int.MAX_VALUE / 16 ||
+            height > Int.MAX_VALUE || width > (Int.MAX_VALUE / 4).toLong() / height) {
+            throw ImageResourceException("image_too_large", "Image dimensions exceed native bitmap/array limits")
+        }
+        return width * height
+    }
+
+    fun validate(nativeBytes: Long, managedBytes: Long) {
+        val runtime = Runtime.getRuntime()
+        val heapAvailable = (runtime.maxMemory() - (runtime.totalMemory() - runtime.freeMemory())).coerceAtLeast(0)
+        val heapReserve = maxOf(16 * MIB, heapAvailable / 4)
+        val heapBudget = (heapAvailable - heapReserve).coerceAtLeast(0)
+        val memory = ActivityManager.MemoryInfo()
+        val nativeBudget = try {
+            val manager = activity
+            if (manager == null) 0L else {
+                manager.getMemoryInfo(memory)
+                // availMem already accounts for resident app/model allocations.
+                // Subtracting PSS from a fixed process share would count them
+                // twice and reject small images while the device has ample RAM.
+                val available = minOf((memory.availMem - memory.threshold).coerceAtLeast(0),
+                    memory.totalMem / 2)
+                if (memory.lowMemory) 0L else
+                    (available - maxOf(128 * MIB, available / 4)).coerceAtLeast(0)
+            }
+        } catch (_: RuntimeException) {
+            0L // A failed device query must not permit unbounded allocations.
+        }
+        if (nativeBytes > nativeBudget || managedBytes > heapBudget) {
+            throw ImageResourceException("memory_limit",
+                "Insufficient available memory for image processing; use a smaller image or model scale " +
+                    "(working ${nativeBytes / MIB} MiB / $nativeBudget bytes, " +
+                    "Java ${managedBytes / MIB} MiB / $heapBudget bytes)")
+        }
+    }
+
+    companion object {
+        const val MIB = 1024L * 1024
+    }
+}
 
 /** Serial native inference, bounded unrendered results, and independent render controls. */
-class ColorizeEngine(profileDirectory: File) {
+class ColorizeEngine(profileDirectory: File, context: Context) {
     private val env = OrtEnvironment.getEnvironment()
     private val models = ModelManager(env, profileDirectory)
+    private val memory = ImageMemoryPolicy(context)
 
     data class ModelInfo(val channels: Int, val scale: Int, val inputWidth: Int, val inputHeight: Int) {
         fun toMap(): Map<String, Int> = mapOf(
@@ -150,9 +204,9 @@ class ColorizeEngine(profileDirectory: File) {
             require(scale in 1..8) { "Unsupported SR scale: $scale" }
             val tileW = if (width > 0) width else 384
             val tileH = if (height > 0) height else 384
-            require(tileW.toLong() * tileH * scale * scale * channels * 8 <= WORK_LIMIT) {
-                "Fixed model tiles exceed the Android inference memory limit"
-            }
+            memory.dimensions(tileW.toLong() * scale, tileH.toLong() * scale)
+            memory.validate(tileW.toLong() * tileH * channels * (32 + scale * scale * 24),
+                tileW.toLong() * tileH * channels * (16 + scale * scale * 12))
         }
         val info = ModelInfo(channels, scale, width, height)
         rememberMetadata(key, info)
@@ -237,49 +291,98 @@ class ColorizeEngine(profileDirectory: File) {
         return ModelInfo(channels, 1, input[3].coerceAtLeast(0).toInt(), input[2].coerceAtLeast(0).toInt())
     }
 
-    fun colorize(input: Bitmap, modelPath: String, modelId: String, inputId: String,
-                 type: String, backend: String, intensity: Float, strength: Float,
-                 outputScale: Double): Output {
+    private data class ImagePlan(val info: ModelInfo, val targetW: Int, val targetH: Int,
+                                 val noInference: Boolean, val cacheKey: CacheKey, val cached: Base?)
+
+    /** The plugin calls this before BitmapFactory allocates any decoded pixels. */
+    fun validateImage(width: Int, height: Int, modelPath: String, modelId: String, inputId: String,
+                      type: String, backend: String, intensity: Float, strength: Float,
+                      outputScale: Double, forceReprocess: Boolean) {
+        plan(width, height, modelPath, modelId, inputId, type, backend, intensity, strength,
+            outputScale, forceReprocess)
+    }
+
+    private fun plan(width: Int, height: Int, modelPath: String, modelId: String, inputId: String,
+                     type: String, backend: String, intensity: Float, strength: Float,
+                     outputScale: Double, forceReprocess: Boolean, preparedBase: Base? = null): ImagePlan {
+        val inputPixels = memory.dimensions(width.toLong(), height.toLong())
         require(backend == "auto" || backend == "cpu") { "Unsupported backend: $backend" }
         require(type in SUPPORTED_TYPES) { "Unsupported type: $type" }
         require(intensity.isFinite() && intensity in (if (type == "esrgan") 0.3f else 0f)..1.2f) {
             "Intensity is outside the supported range"
         }
         require(strength.isFinite() && strength in 0f..1f) { "Strength must be in [0,1]" }
+        require(outputScale.isFinite() && outputScale >= 0.0 && outputScale <= 8.0) {
+            "Output scale is outside the supported range"
+        }
         val key = ModelKey(modelPath, modelId, type)
         val info = inspect(key)
         val scale = if (outputScale == 0.0) info.scale.toDouble() else outputScale
-        require(scale.isFinite() && scale >= 1.0 && scale <= info.scale) {
+        require(scale >= 1.0 && scale <= info.scale) {
             "Output scale must be between 1 and native scale ${info.scale}"
         }
-        val targetW = (input.width * scale).roundToInt()
-        val targetH = (input.height * scale).roundToInt()
-        val nativePixels = input.width.toLong() * input.height * info.scale * info.scale
-        val targetPixels = targetW.toLong() * targetH
+        val targetWidth = (width * scale).roundToLong()
+        val targetHeight = (height * scale).roundToLong()
+        val targetPixels = memory.dimensions(targetWidth, targetHeight)
         val noInference = (type == "esrgan" && strength == 0f) || (type != "esrgan" && intensity == 0f)
-        // Bound phase peaks, not the sum of buffers whose lifetimes do not overlap.
-        val inputPixels = input.width.toLong() * input.height
-        val workingBytes = if (type != "esrgan") inputPixels * (if (noInference) 48 else 72)
-            else inputPixels * 20 + targetPixels * 32 + (if (noInference) 0L else nativePixels * 44)
-        require(workingBytes <= WORK_LIMIT) {
-            "Requested output exceeds the 768 MiB Android AI working-image limit; use a smaller input/model scale"
-        }
+        val nativePixels = if (noInference) 0L else
+            memory.dimensions(width.toLong() * info.scale, height.toLong() * info.scale)
+        val cacheKey = CacheKey(key, inputId, backend)
+        val cached = preparedBase ?: if (noInference || forceReprocess) null else cache[cacheKey]
+        val newInference = !noInference && cached == null
+        // Include source, native-resolution float/alpha render intermediates,
+        // both final blend branches, bitmap and PNG/MethodChannel copies.
+        // Cache hits save the result allocation, not native-resolution rendering.
+        val imageBytes = if (type == "esrgan")
+            inputPixels * 40 + nativePixels * (if (newInference) 64 else 52) + targetPixels * 48
+        else inputPixels * 64 + (if (newInference) inputPixels * 8 else 0) + targetPixels * 24
+        val tileW = if (info.inputWidth > 0) info.inputWidth else if (type == "esrgan") 384 else 512
+        val tileH = if (info.inputHeight > 0) info.inputHeight else if (type == "esrgan") 384 else 512
+        val tilePixels = memory.dimensions(tileW.toLong() * info.scale, tileH.toLong() * info.scale)
+        val tileInput = tileW.toLong() * tileH * info.channels
+        val tileOutput = tilePixels * maxOf(3, info.channels)
+        val nativeScratch = if (newInference) tileInput * 32 + tileOutput * 24 else 0L
+        val managedScratch = if (newInference) tileInput * 16 + tileOutput * 12 else 0L
+        // Before API 26, Bitmap storage also consumes the managed heap. PNG's
+        // growable buffer, toByteArray and channel encoding can coexist on all APIs.
+        val bitmapHeap = if (Build.VERSION.SDK_INT < 26) 4 * (inputPixels + targetPixels) else 0L
+        memory.validate(imageBytes + nativeScratch + 64 * ImageMemoryPolicy.MIB,
+            targetPixels * 16 + bitmapHeap + managedScratch + 16 * ImageMemoryPolicy.MIB)
+        return ImagePlan(info, targetWidth.toInt(), targetHeight.toInt(), noInference, cacheKey, cached)
+    }
+
+    fun colorize(input: Bitmap, modelPath: String, modelId: String, inputId: String,
+                 type: String, backend: String, intensity: Float, strength: Float,
+                 outputScale: Double, forceReprocess: Boolean): Output {
+        // Recheck live headroom after decode; other apps may have allocated meanwhile.
+        val imagePlan = plan(input.width, input.height, modelPath, modelId, inputId, type, backend,
+            intensity, strength, outputScale, forceReprocess)
+        val info = imagePlan.info
+        val targetW = imagePlan.targetW
+        val targetH = imagePlan.targetH
+        val noInference = imagePlan.noInference
         if (noInference) {
             val bitmap = if (type == "esrgan") ImageUtils.renderSr(input, null, targetW, targetH, 0f)
                 else renderColor(input, null, 0f, type == "deoldify")
             return Output(bitmap, "none", info.scale, false, null)
         }
-        val cacheKey = CacheKey(key, inputId, backend)
-        cache[cacheKey]?.let { base ->
+        val cacheKey = imagePlan.cacheKey
+        imagePlan.cached?.let { base ->
             return Output(render(input, base, info, type, targetW, targetH, intensity, strength),
                 base.backend, info.scale, true, base.reason)
         }
         // A changed identity cannot keep the old model's image results alive indefinitely.
         val stale = cache.keys.filter { it.model.path == modelPath && it.model.identity != modelId }
         stale.forEach { removeCached(it) }
-        val base = infer(input, key, info, backend)
+        val base = infer(input, cacheKey.model, info, backend)
         try {
+            // Session/GPU allocations during inference also consume live headroom.
+            plan(input.width, input.height, modelPath, modelId, inputId, type, backend,
+                intensity, strength, outputScale, forceReprocess, base)
             val rendered = render(input, base, info, type, targetW, targetH, intensity, strength)
+            // Replace only this input/model/backend entry after successful rendering.
+            // A forced miss must never leak the old Mat or inflate cacheBytes.
+            removeCached(cacheKey)
             if (base.bytes <= CACHE_LIMIT) {
                 while (cacheBytes + base.bytes > CACHE_LIMIT) removeCached(cache.keys.first())
                 cache[cacheKey] = base
@@ -628,6 +731,5 @@ class ColorizeEngine(profileDirectory: File) {
         private val MODERN_COLOR_TYPES = setOf("manga_v2", "manga_light", "ddcolor", "anime_deoldify")
         private val SUPPORTED_TYPES = MODERN_COLOR_TYPES + setOf("esrgan", "deoldify")
         private const val CACHE_LIMIT = 128L * 1024 * 1024
-        private const val WORK_LIMIT = 768L * 1024 * 1024
     }
 }

@@ -10,21 +10,21 @@ Pod::Spec.new do |s|
   s.osx.deployment_target = '13.3'
   s.ios.dependency 'Flutter'
   s.osx.dependency 'FlutterMacOS'
-  s.dependency 'onnxruntime-c', '= 1.22.0'
+  s.dependency 'VeneraOnnxRuntime', '= 1.29.0'
   s.dependency 'VeneraOpenCV', '= 4.11.0'
-  s.source_files = 'apple/*.{h,mm}', 'image_ai/engine.{h,cpp}'
+  s.source_files = 'apple/*.{h,mm}', 'image_ai/engine.{h,cpp}', 'image_ai/image_memory.{h,cpp}'
   s.public_header_files = 'apple/VeneraImageAIPlugin.h'
-  s.private_header_files = 'image_ai/engine.h'
+  s.private_header_files = 'image_ai/engine.h', 'image_ai/image_memory.h', 'apple/metal_provider.h'
   s.header_mappings_dir = '.'
   s.requires_arc = true
   s.static_framework = true
-  s.frameworks = 'Foundation', 'ImageIO'
+  s.frameworks = 'Foundation', 'ImageIO', 'Metal'
   s.libraries = 'c++'
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++17',
     'CLANG_CXX_LIBRARY' => 'libc++',
     'GCC_ENABLE_CPP_EXCEPTIONS' => 'YES',
-    'HEADER_SEARCH_PATHS' => '$(inherited) "$(PODS_ROOT)/onnxruntime-c/Headers"'
+    'HEADER_SEARCH_PATHS' => '$(inherited) "$(PODS_XCFRAMEWORKS_BUILD_DIR)/VeneraOnnxRuntime/onnxruntime.framework/Headers"'
   }
 end

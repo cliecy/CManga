@@ -130,7 +130,7 @@ int Run(const std::vector<std::string>& arguments) {
   std::map<std::string, std::string> options;
   for (size_t i = 1; i < arguments.size(); i += 2) {
     if (i + 1 >= arguments.size() || arguments[i].rfind("--", 0) != 0) {
-      throw std::runtime_error("Usage: venera_image_ai_smoke --model PATH --image PATH --output PATH --type esrgan|deoldify|manga_v2|manga_light|ddcolor|anime_deoldify [--backend cpu|auto] [--scale 1.3] [--strength 1] [--intensity 1] [--renders 3] [--check-strength true|false (esrgan only)]. Color intensity is 0..1.2; all color types retain input dimensions and alpha.");
+      throw std::runtime_error("Usage: venera_image_ai_smoke --model PATH --image PATH --output PATH --type esrgan|deoldify|manga_v2|manga_light|ddcolor|anime_deoldify [--backend metal|cpu|auto] [--scale 1.3] [--strength 1] [--intensity 1] [--renders 3] [--check-strength true|false (esrgan only)]. Color intensity is 0..1.2; all color types retain input dimensions and alpha.");
     }
     static constexpr const char* keys[] = {"--model", "--image", "--output", "--type", "--backend",
         "--scale", "--strength", "--intensity", "--renders", "--check-strength"};
@@ -164,7 +164,11 @@ int Run(const std::vector<std::string>& arguments) {
   if (check_strength && request.type != "esrgan") {
     throw std::runtime_error("--check-strength requires esrgan; color models use --intensity, not SR blend strength.");
   }
+#ifdef __APPLE__
+  request.backend = optional("--backend", "metal");
+#else
   request.backend = optional("--backend", "cpu");
+#endif
   request.output_scale = std::stod(optional("--scale", "0"));
   request.strength = std::stod(optional("--strength", "1"));
   request.intensity = std::stod(optional("--intensity", "1"));
@@ -183,7 +187,7 @@ int Run(const std::vector<std::string>& arguments) {
   const cv::Mat original = cv::imdecode(request.image_bytes, cv::IMREAD_UNCHANGED);
   image_ai::Engine engine;
   const auto capabilities = engine.GetCapabilities();
-  if (!capabilities.supported) throw std::runtime_error(capabilities.reason);
+  if (!capabilities.supported) throw image_ai::Error("backend_unavailable", capabilities.reason);
   const auto info = engine.GetModelInfo(request.model_path, request.type);
   const double original_strength = request.strength, original_intensity = request.intensity;
   for (int render = 0; render < renders; ++render) {

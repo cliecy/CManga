@@ -67,8 +67,8 @@ class ComicImage extends StatefulWidget {
   final void Function(State<ComicImage> state)? onDispose;
 
   static void clear() {
-    ReaderPreloader.invalidateAll();
     ReaderImageDetailsStore.instance.invalidate();
+    ReaderPreloader.invalidateAll();
     _ComicImageState.clear();
   }
 
@@ -104,6 +104,45 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
     }
   }
 
+  ReaderImageProvider? get _readerProvider {
+    ImageProvider provider = widget.image;
+    while (provider is ResizeImage) {
+      provider = provider.imageProvider;
+    }
+    return provider is ReaderImageProvider ? provider : null;
+  }
+
+  bool _matchesPage(ReaderImageProvider provider) {
+    final current = _readerProvider;
+    return current != null &&
+        current.imageKey == provider.imageKey &&
+        current.sourceKey == provider.sourceKey &&
+        current.cid == provider.cid &&
+        current.eid == provider.eid &&
+        current.page == provider.page;
+  }
+
+  static Future<void> reprocess(ReaderImageProvider provider) async {
+    await provider.reprocess();
+    await provider.evict();
+    final images = _instances
+        .where((image) => image.mounted && image._matchesPage(provider))
+        .toList();
+    for (final image in images) {
+      if (!image.mounted || !image._matchesPage(provider)) continue;
+      // ResizeImage has its own Flutter cache entry; evict only this page.
+      await image.widget.image.evict();
+    }
+    for (final image in images) {
+      if (!image.mounted || !image._matchesPage(provider)) continue;
+      image.setState(() {
+        image._loadingProgress = null;
+        image._lastException = null;
+      });
+      image._resolveImage();
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -131,7 +170,7 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
     _updateInvertColors();
     _resolveImage();
 
-    if (TickerMode.of(context)) {
+    if (TickerMode.valuesOf(context).enabled) {
       _listenToStream();
     } else {
       _stopListeningToStream(keepStreamAlive: true);
@@ -314,33 +353,27 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
               children: [
                 Expanded(
                   child: Center(
-                    child: Text(_lastException.toString(), maxLines: 3),
+                    child: Text(_lastException.toString().tl, maxLines: 3),
                   ),
                 ),
                 const SizedBox(height: 4),
-                MouseRegion(
-                  cursor: SystemMouseCursors.click,
-                  child: Listener(
-                    onPointerDown: (details) {
-                      GlobalState.find<_ReaderGestureDetectorState>()
-                          .ignoreNextTap();
-                      setState(() {
-                        _loadingProgress = null;
-                        _lastException = null;
-                      });
-                      _resolveImage();
-                    },
-                    child: SizedBox(
-                      width: 84,
-                      height: 36,
-                      child: Center(
-                        child: Text(
-                          "Retry".tl,
-                          style: TextStyle(color: Colors.blue),
+                Listener(
+                  onPointerDown: (_) {
+                    GlobalState.find<_ReaderGestureDetectorState>()
+                        .ignoreNextTap();
+                  },
+                  child: _readerProvider != null
+                      ? _ReaderImageReprocessButton(provider: _readerProvider!)
+                      : TextButton(
+                          onPressed: () {
+                            setState(() {
+                              _loadingProgress = null;
+                              _lastException = null;
+                            });
+                            _resolveImage();
+                          },
+                          child: Text('Retry'.tl),
                         ),
-                      ),
-                    ),
-                  ),
                 ),
                 const SizedBox(height: 16),
               ],
@@ -420,27 +453,71 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
             height: height,
             child: Center(child: result),
           );
-          return result;
+          final provider = _readerProvider;
+          if (provider == null) return result;
+          return AnimatedBuilder(
+            animation: ReaderImageDetailsStore.instance,
+            child: result,
+            builder: (context, image) {
+              final record = ReaderImageDetailsStore.instance.lookup(
+                provider.imageKey,
+                provider.sourceKey,
+                provider.cid,
+                provider.eid,
+                provider.page,
+              );
+              if (record?.state != 'Failed' && record?.state != 'Cancelled') {
+                return image!;
+              }
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  image!,
+                  Text(record?.values['Error']?.tl ?? 'Failed'.tl, maxLines: 3),
+                  _ReaderImageReprocessButton(provider: provider),
+                ],
+              );
+            },
+          );
         } else {
           // build progress
           return SizedBox(
             width: width,
             height: height,
             child: Center(
-              child: SizedBox(
-                width: 24,
-                height: 24,
-                child: CircularProgressIndicator(
-                  strokeWidth: 3,
-                  backgroundColor: context.colorScheme.surfaceContainer,
-                  value:
-                      (_loadingProgress != null &&
-                          _loadingProgress!.expectedTotalBytes != null &&
-                          _loadingProgress!.expectedTotalBytes! != 0)
-                      ? _loadingProgress!.cumulativeBytesLoaded /
-                            _loadingProgress!.expectedTotalBytes!
-                      : 0,
-                ),
+              child: AnimatedBuilder(
+                animation: ReaderImageDetailsStore.instance,
+                builder: (context, _) {
+                  final provider = _readerProvider;
+                  final blocked = provider == null
+                      ? null
+                      : ReaderPreloader.forPage(provider)?.blockedPage;
+                  return Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 3,
+                          backgroundColor: context.colorScheme.surfaceContainer,
+                          value: (_loadingProgress?.expectedTotalBytes ?? 0) > 0
+                              ? _loadingProgress!.cumulativeBytesLoaded /
+                                    _loadingProgress!.expectedTotalBytes!
+                              : null,
+                        ),
+                      ),
+                      if (blocked != null) ...[
+                        Text(
+                          'Waiting for page @page'.tlParams({
+                            'page': '${blocked.page}',
+                          }),
+                        ),
+                        _ReaderImageReprocessButton(provider: blocked),
+                      ],
+                    ],
+                  );
+                },
               ),
             ),
           );
@@ -463,6 +540,103 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
         'wasSynchronouslyLoaded',
         _wasSynchronouslyLoaded,
       ),
+    );
+  }
+}
+
+class _ReaderImageReprocessButton extends StatefulWidget {
+  const _ReaderImageReprocessButton({
+    required this.provider,
+    this.enabled = true,
+  });
+
+  final ReaderImageProvider provider;
+  final bool enabled;
+
+  @override
+  State<_ReaderImageReprocessButton> createState() =>
+      _ReaderImageReprocessButtonState();
+}
+
+class _ReaderImageReprocessButtonState
+    extends State<_ReaderImageReprocessButton> {
+  bool _processing = false;
+  Object? _error;
+
+  Future<void> _reprocess() async {
+    if (_processing || !widget.enabled) return;
+    setState(() {
+      _processing = true;
+      _error = null;
+    });
+    try {
+      await _ComicImageState.reprocess(widget.provider);
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = error);
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _processing = false);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: ReaderImageDetailsStore.instance,
+      builder: (context, _) {
+        final provider = widget.provider;
+        final state = ReaderImageDetailsStore.instance
+            .lookup(
+              provider.imageKey,
+              provider.sourceKey,
+              provider.cid,
+              provider.eid,
+              provider.page,
+            )
+            ?.state;
+        final isQueuedOrProcessing = const {
+          'Queued',
+          'Waiting for previous page',
+          'Retrying',
+          'Processing',
+          'Loading',
+        }.contains(state);
+        final busy = _processing || isQueuedOrProcessing;
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextButton.icon(
+              onPressed: widget.enabled && !busy ? _reprocess : null,
+              icon: busy
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.refresh),
+              label: Text(
+                busy
+                    ? (isQueuedOrProcessing ? state! : 'Queued').tl
+                    : 'Reprocess page'.tl,
+              ),
+            ),
+            if (_error != null)
+              Semantics(
+                liveRegion: true,
+                child: Text(
+                  '${"Reprocessing failed".tl}: ${_error.toString().tl}',
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              ),
+          ],
+        );
+      },
     );
   }
 }

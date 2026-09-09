@@ -1,14 +1,14 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:venera/foundation/log.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:path/path.dart' as path;
 
 import '../image_ai_service.dart';
+import '../image_ai_cache.dart';
 import 'anime4k_upscaler.dart';
 
 /// Anime4K 超分服务
@@ -24,12 +24,10 @@ class Anime4KService {
 
   static Anime4KService get instance => _instance;
 
-  /// 缓存目录路径
-  String? _cacheDir;
+  final _cache = ImageAiCache.instance;
 
   final _inFlight =
       <String, Future<({Uint8List? bytes, ImageAiStatus status})?>>{};
-  int _queuedBytes = 0;
   int _generation = 0;
 
   /// 最大并发处理数
@@ -39,76 +37,35 @@ class Anime4KService {
   int _runningTasks = 0;
 
   /// 任务队列
-  final List<Function> _taskQueue = [];
+  final _taskQueue = Queue<Future<void> Function()>();
 
-  /// 初始化缓存目录
   Future<void> init() async {
     try {
-      final dir = await getTemporaryDirectory();
-      _cacheDir = path.join(dir.path, 'anime4k_cache');
-      final cacheDirectory = Directory(_cacheDir!);
-      if (!await cacheDirectory.exists()) {
-        await cacheDirectory.create(recursive: true);
-      }
-    } catch (e) {
-      Log.error('Anime4K', 'Anime4K cache init error: $e');
+      await _cache.init();
+    } catch (error) {
+      Log.error('Anime4K', 'Anime4K cache init error: $error');
     }
   }
 
-  /// 获取缓存文件路径
-  ///
-  /// 使用 key 的 SHA-256 作为文件名，避免 [String.hashCode] 哈希碰撞导致
-  /// 不同图片命中彼此的缓存（显示错图）。
-  String? _getCachePath(String key) {
-    if (_cacheDir == null) return null;
-    final hash = sha256.convert(utf8.encode(key)).toString();
-    return path.join(
-      _cacheDir!,
-      '${key.startsWith('v1-base-') ? 'base' : 'render'}_$hash.png',
-    );
-  }
+  String _cacheGroup(String key) =>
+      key.startsWith('v1-base-') ? 'v1_base' : 'v1_render';
 
-  /// 检查是否有缓存，有则返回缓存数据
+  String _cacheIdentity(String key) =>
+      sha256.convert(utf8.encode(key)).toString();
+
   Future<Uint8List?> _getFromCache(String key) async {
-    final cachePath = _getCachePath(key);
-    if (cachePath == null) return null;
-
-    final file = File(cachePath);
-    if (await file.exists()) {
-      try {
-        return await file.readAsBytes();
-      } catch (e) {
-        return null;
-      }
+    try {
+      return (await _cache.read(_cacheGroup(key), _cacheIdentity(key)))?.bytes;
+    } on FileSystemException {
+      return null;
     }
-    return null;
   }
 
-  /// 保存处理结果到缓存
-  Future<void> _saveToCache(String key, Uint8List data) async {
-    final cachePath = _getCachePath(key);
-    if (cachePath == null) return;
-
+  Future<void> _saveToCache(String key, Uint8List bytes) async {
     try {
-      final file = File(cachePath);
-      await file.writeAsBytes(data);
-      final entries = <({File file, FileStat stat})>[];
-      var total = 0;
-      await for (final entry in Directory(_cacheDir!).list()) {
-        if (entry is File) {
-          final stat = await entry.stat();
-          entries.add((file: entry, stat: stat));
-          total += stat.size;
-        }
-      }
-      entries.sort((a, b) => a.stat.modified.compareTo(b.stat.modified));
-      for (final entry in entries) {
-        if (total <= 256 * 1024 * 1024) break;
-        await entry.file.delete();
-        total -= entry.stat.size;
-      }
-    } catch (e) {
-      Log.error('Anime4K', 'Anime4K cache save error: $e');
+      await _cache.write(_cacheGroup(key), _cacheIdentity(key), bytes);
+    } catch (error) {
+      Log.error('Anime4K', 'Anime4K cache save error: $error');
     }
   }
 
@@ -126,8 +83,19 @@ class Anime4KService {
     double pushStrength = 0.31,
     double pushGradStrength = 1.0,
     double strength = 1.0,
+    bool forceReprocess = false,
     void Function(ImageAiStatus)? onStatus,
   }) async {
+    if (Platform.isMacOS || Platform.isIOS) {
+      ImageAiService.instance.reportError(
+        const ImageAiFailure(
+          'backend_unavailable',
+          'The legacy enhancement engine uses CPU; select AI super-resolution for Metal GPU.',
+        ),
+      );
+      onStatus?.call(ImageAiService.instance.status.value);
+      return null;
+    }
     if (!scaleFactor.isFinite ||
         scaleFactor < 1 ||
         scaleFactor > 4 ||
@@ -150,27 +118,18 @@ class Anime4KService {
     final baseKey =
         'v1-base-v3:$inputId:$scaleFactor:$pushStrength:$pushGradStrength';
     final fullKey = 'v1-render-v3:$baseKey:$strength';
-    final existing = _inFlight[fullKey];
+    final requestKey = '$fullKey:$forceReprocess';
+    final existing = _inFlight[requestKey];
     if (existing != null) {
       final result = (await existing)!;
       onStatus?.call(result.status);
       return result.bytes;
     }
-    if (_taskQueue.length >= 16 ||
-        _queuedBytes + imageBytes.length > 128 * 1024 * 1024) {
-      ImageAiService.instance.reportError(
-        'Super-resolution queue is full; reload this page',
-      );
-      onStatus?.call(ImageAiService.instance.status.value);
-      return null;
-    }
-    _queuedBytes += imageBytes.length;
     final generation = _generation;
     final future = _enqueueTask<({Uint8List? bytes, ImageAiStatus status})>(
       () async {
         try {
-          if (_cacheDir == null) await init();
-          final cached = await _getFromCache(fullKey);
+          final cached = forceReprocess ? null : await _getFromCache(fullKey);
           if (cached != null) {
             const resultStatus = ImageAiStatus(
               message: 'v1 rendered image cache (CPU)',
@@ -188,7 +147,7 @@ class Anime4KService {
           Uint8List? enhanced;
           var baseCacheHit = false;
           if (strength > 0) {
-            enhanced = await _getFromCache(baseKey);
+            enhanced = forceReprocess ? null : await _getFromCache(baseKey);
             baseCacheHit = enhanced != null;
             enhanced ??= await Anime4KUpscaler.processInIsolate(
               Anime4KParams(
@@ -231,18 +190,16 @@ class Anime4KService {
             operation: 'v1 super-resolution failed',
           );
           return (bytes: null, status: ImageAiService.instance.status.value);
-        } finally {
-          _queuedBytes -= imageBytes.length;
         }
       },
     );
-    _inFlight[fullKey] = future;
+    _inFlight[requestKey] = future;
     try {
       final result = (await future)!;
       onStatus?.call(result.status);
       return result.bytes;
     } finally {
-      _inFlight.remove(fullKey);
+      _inFlight.remove(requestKey);
     }
   }
 
@@ -270,7 +227,7 @@ class Anime4KService {
   /// 执行下一个任务
   void _nextTask() {
     if (_runningTasks < _maxConcurrentTasks && _taskQueue.isNotEmpty) {
-      final task = _taskQueue.removeAt(0);
+      final task = _taskQueue.removeFirst();
       task();
     }
   }
@@ -307,38 +264,9 @@ class Anime4KService {
   /// Clear rendered images without discarding reusable algorithm results.
   Future<void> clearCache() async {
     _generation++;
-    if (_cacheDir == null) return;
-    try {
-      final dir = Directory(_cacheDir!);
-      if (await dir.exists()) {
-        await for (final entry in dir.list()) {
-          if (entry is File && !path.basename(entry.path).startsWith('base_')) {
-            await entry.delete();
-          }
-        }
-      }
-      Log.info('Anime4K', 'Anime4K: cache cleared');
-    } catch (e) {
-      Log.error('Anime4K', 'Anime4K cache clear error: $e');
-    }
+    await _enqueueTask<void>(() => _cache.clear('v1_render'));
   }
 
-  /// 获取缓存占用的磁盘大小（字节）
-  Future<int> getCacheSize() async {
-    if (_cacheDir == null) return 0;
-    try {
-      final dir = Directory(_cacheDir!);
-      if (!await dir.exists()) return 0;
-
-      int totalSize = 0;
-      await for (final entity in dir.list(recursive: true)) {
-        if (entity is File) {
-          totalSize += await entity.length();
-        }
-      }
-      return totalSize;
-    } catch (e) {
-      return 0;
-    }
-  }
+  Future<int> getCacheSize() async =>
+      await _cache.size('v1_base') + await _cache.size('v1_render');
 }

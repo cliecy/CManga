@@ -2,7 +2,8 @@ include_guard(GLOBAL)
 include("${CMAKE_CURRENT_LIST_DIR}/ImageAiDependencies.cmake")
 set(VENERA_AI_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../native/image_ai")
 
-add_library(venera_image_ai STATIC "${VENERA_AI_SOURCE_DIR}/engine.cpp")
+add_library(venera_image_ai STATIC "${VENERA_AI_SOURCE_DIR}/engine.cpp"
+  "${VENERA_AI_SOURCE_DIR}/image_memory.cpp")
 target_compile_features(venera_image_ai PUBLIC cxx_std_17)
 target_compile_options(venera_image_ai PRIVATE /EHsc /W4 /utf-8)
 target_compile_definitions(venera_image_ai PRIVATE _HAS_EXCEPTIONS=1
@@ -18,7 +19,7 @@ target_include_directories(venera_image_ai SYSTEM PRIVATE
 # ORT and DirectML are intentionally NOT linked: each runtime is loaded from an
 # explicit bundle path so missing optional DirectML cannot prevent CPU startup.
 target_link_libraries(venera_image_ai PRIVATE opencv_core opencv_imgproc
-  opencv_imgcodecs d3d12 dxgi)
+  opencv_imgcodecs d3d12 dxgi windowscodecs ole32)
 
 add_executable(venera_image_ai_smoke EXCLUDE_FROM_ALL
   "${VENERA_AI_SOURCE_DIR}/smoke.cpp")

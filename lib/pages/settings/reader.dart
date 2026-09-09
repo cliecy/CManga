@@ -198,7 +198,9 @@ class _ReaderSettingsState extends State<ReaderSettings> {
         SelectSetting(
           title: "Anime4K Version".tl,
           help:
-              "AI requires a compatible model on Windows, Android, macOS or iOS. Linux is not supported."
+              (App.isMacOS || App.isIOS
+                      ? 'On macOS and iOS, v4 AI requires a compatible model and uses Metal GPU only, without CPU inference fallback. v1 is a non-neural CPU algorithm. Linux is not supported.'
+                      : 'AI requires a compatible model on Windows, Android, macOS or iOS. Linux is not supported.')
                   .tl,
           settingKey: "anime4KVersion",
           optionTranslation: {"v1": "v1 (CPU)".tl, "v4": "v4 (AI)".tl},

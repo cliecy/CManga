@@ -229,23 +229,30 @@ class _ImageAiControlsState extends State<_ImageAiControls> {
                   title: Text('Last AI operation'.tl),
                   subtitle: Text(status.message.tl),
                 ),
-                SelectSetting(
-                  title: 'AI execution backend'.tl,
-                  help:
-                      (App.isWindows
-                              ? 'Auto tries DirectML, then the same AI model on CPU.'
-                              : App.isAndroid
-                              ? 'Auto tries NNAPI for super-resolution, then the same model on CPU. Colorization uses CPU.'
-                              : App.isMacOS || App.isIOS
-                              ? 'Auto and CPU both use ONNX Runtime on CPU on macOS and iOS.'
-                              : 'Native AI is supported only on Windows, Android, macOS and iOS')
+                if (App.isMacOS || App.isIOS)
+                  ListTile(
+                    title: Text('AI execution backend'.tl),
+                    subtitle: Text(
+                      'ONNX Runtime WebGPU (Metal) only. CPU neural inference is not supported.'
                           .tl,
-                  settingKey: 'imageAiBackend',
-                  optionTranslation: {'auto': 'Auto'.tl, 'cpu': 'CPU'},
-                  comicId: widget.comicId,
-                  comicSource: widget.comicSource,
-                  onChanged: () => _changed('imageAiBackend'),
-                ),
+                    ),
+                  )
+                else
+                  SelectSetting(
+                    title: 'AI execution backend'.tl,
+                    help:
+                        (App.isWindows
+                                ? 'Auto tries DirectML, then the same AI model on CPU.'
+                                : App.isAndroid
+                                ? 'Auto tries NNAPI for super-resolution, then the same model on CPU. Colorization uses CPU.'
+                                : 'Native AI is supported only on Windows, Android, macOS and iOS')
+                            .tl,
+                    settingKey: 'imageAiBackend',
+                    optionTranslation: {'auto': 'Auto'.tl, 'cpu': 'CPU'},
+                    comicId: widget.comicId,
+                    comicSource: widget.comicSource,
+                    onChanged: () => _changed('imageAiBackend'),
+                  ),
               ],
               if (widget.superResolution) ...[
                 if (isV4) ...[

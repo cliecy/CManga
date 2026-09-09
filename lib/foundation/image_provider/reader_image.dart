@@ -1,4 +1,5 @@
 import 'dart:async' show Future, StreamController;
+import 'dart:convert';
 import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -15,6 +16,7 @@ import 'package:venera/utils/anime4k/anime4k_v4_service.dart';
 import 'package:venera/utils/colorization/colorization_service.dart';
 import 'package:venera/utils/processed_image_store.dart';
 import 'reader_image_details.dart';
+import 'reader_preloader.dart';
 
 class ReaderImageProvider
     extends BaseImageProvider<image_provider.ReaderImageProvider> {
@@ -38,24 +40,67 @@ class ReaderImageProvider
   final int page;
 
   @override
-  Future<Uint8List> load(chunkEvents, checkStop, {Uint8List? sourceBytes}) =>
-      _loadProcessed(
-        chunkEvents,
-        checkStop,
-        requireComplete: false,
-        sourceBytes: sourceBytes,
-      );
+  bool get retryLoadFailures => false;
 
-  /// Export uses precisely the reader pipeline, never the original cache.
+  @override
+  Future<Uint8List> load(
+    StreamController<ImageChunkEvent> chunkEvents,
+    void Function() checkStop, {
+    Uint8List? sourceBytes,
+  }) async {
+    checkStop();
+    final queue = ReaderPreloader.forPage(this);
+    try {
+      final bytes = queue == null || sourceBytes != null
+          ? await _loadProcessed(
+              chunkEvents,
+              checkStop,
+              sourceBytes: sourceBytes,
+            )
+          : await queue.load(this, chunkEvents);
+      // The widget may disappear, but it does not own the chapter's AI work.
+      checkStop();
+      return bytes;
+    } catch (error) {
+      checkStop();
+      if (error is ImageAiFailure && error.previewBytes != null) {
+        // Keep the source/last completed stage readable, without unblocking
+        // later AI pages or permitting an incomplete export.
+        return error.previewBytes!;
+      }
+      rethrow;
+    }
+  }
+
+  Future<Uint8List> loadForQueue(
+    StreamController<ImageChunkEvent> chunkEvents,
+    void Function() checkStop, {
+    required ReaderImageDetails record,
+    bool forceReprocess = false,
+  }) => _loadProcessed(
+    chunkEvents,
+    checkStop,
+    queuedRecord: record,
+    forceReprocess: forceReprocess,
+  );
+
+  /// Refresh only this page, respecting an earlier failed page's barrier.
+  Future<void> reprocess() async {
+    final queue = ReaderPreloader.forPage(this);
+    if (queue != null) return queue.reprocess(this);
+    final events = StreamController<ImageChunkEvent>.broadcast();
+    try {
+      await _loadProcessed(events, () {}, forceReprocess: true);
+    } finally {
+      await events.close();
+    }
+  }
+
+  /// Export uses precisely the reader pipeline, never an incomplete fallback.
   Future<Uint8List> exportImage({Uint8List? sourceBytes}) async {
     final events = StreamController<ImageChunkEvent>.broadcast();
     try {
-      return await _loadProcessed(
-        events,
-        () {},
-        requireComplete: true,
-        sourceBytes: sourceBytes,
-      );
+      return await _loadProcessed(events, () {}, sourceBytes: sourceBytes);
     } finally {
       await events.close();
     }
@@ -64,7 +109,8 @@ class ReaderImageProvider
   Future<Uint8List> _loadProcessed(
     StreamController<ImageChunkEvent> chunkEvents,
     void Function() checkStop, {
-    required bool requireComplete,
+    ReaderImageDetails? queuedRecord,
+    bool forceReprocess = false,
     Uint8List? sourceBytes,
   }) async {
     // Snapshot before IO so a settings change cannot mix two pipelines.
@@ -92,33 +138,37 @@ class ReaderImageProvider
       'customImageProcessing': appdata.settings['customImageProcessing'],
     };
     final details = ReaderImageDetailsStore.instance;
-    final record = details.begin(
-      imageKey,
-      sourceKey,
-      cid,
-      eid,
-      page,
-      values: {
-        'Source': imageKey,
-        'Page': '$page',
-        'Super-resolution': aiSettings['enableAnime4K'] == true
-            ? 'Waiting'
-            : 'Disabled',
-        'Colorization': aiSettings['enableColorization'] == true
-            ? 'Waiting'
-            : 'Disabled',
-        'Engine Version': '${aiSettings['anime4KVersion']}',
-        'Requested backend': '${aiSettings['imageAiBackend'] ?? 'auto'}',
-        'Requested output scale': aiSettings['anime4KVersion'] == 'v4'
-            ? '${aiSettings['anime4KV4OutputScale'] ?? 0} (0 = model scale)'
-            : '${aiSettings['anime4KScaleFactor'] ?? 2}',
-        'Super-resolution strength':
-            '${((aiSettings['anime4KEnhancementStrength'] as num? ?? 1) * 100).round()}%',
-        'AI output contrast': '${aiSettings['anime4KV4Intensity'] ?? 1}',
-        'Colorization strength':
-            '${((aiSettings['colorizationIntensity'] as num? ?? 1) * 100).round()}%',
-      },
-    );
+    final initialValues = {
+      'Source': imageKey,
+      'Page': '$page',
+      'Super-resolution': aiSettings['enableAnime4K'] == true
+          ? 'Waiting'
+          : 'Disabled',
+      'Colorization': aiSettings['enableColorization'] == true
+          ? 'Waiting'
+          : 'Disabled',
+      'Engine Version': '${aiSettings['anime4KVersion']}',
+      'Requested backend': '${aiSettings['imageAiBackend'] ?? 'auto'}',
+      'Requested output scale': aiSettings['anime4KVersion'] == 'v4'
+          ? '${aiSettings['anime4KV4OutputScale'] ?? 0} (0 = model scale)'
+          : '${aiSettings['anime4KScaleFactor'] ?? 2}',
+      'Super-resolution strength':
+          '${((aiSettings['anime4KEnhancementStrength'] as num? ?? 1) * 100).round()}%',
+      'AI output contrast': '${aiSettings['anime4KV4Intensity'] ?? 1}',
+      'Colorization strength':
+          '${((aiSettings['colorizationIntensity'] as num? ?? 1) * 100).round()}%',
+    };
+    final record =
+        queuedRecord ??
+        details.begin(
+          imageKey,
+          sourceKey,
+          cid,
+          eid,
+          page,
+          values: initialValues,
+        );
+    details.update(record, state: 'Processing', values: initialValues);
     var cancelled = false;
     void checkActive() {
       try {
@@ -139,14 +189,19 @@ class ReaderImageProvider
         checkActive,
         aiSettings,
         record,
-        requireComplete: requireComplete,
+        forceReprocess: forceReprocess,
         sourceBytes: sourceBytes,
       );
     } catch (error) {
       details.update(
         record,
         state: cancelled ? 'Cancelled' : 'Failed',
-        values: {'Error': error.toString()},
+        values: {
+          'Error': error.toString(),
+          if (error is ImageAiFailure) 'Failure code': error.code,
+          if (error is ImageAiFailure && error.detail != null)
+            'Technical details': error.detail!,
+        },
       );
       rethrow;
     }
@@ -157,7 +212,7 @@ class ReaderImageProvider
     void Function() checkStop,
     Map<String, dynamic> aiSettings,
     ReaderImageDetails record, {
-    required bool requireComplete,
+    required bool forceReprocess,
     Uint8List? sourceBytes,
   }) async {
     final details = ReaderImageDetailsStore.instance;
@@ -277,7 +332,6 @@ class ReaderImageProvider
     var finalSize = identical(bytes, imageBytes) && originalSize != null
         ? originalSize
         : await _dimensions(bytes);
-    ImageAiStatus? incompleteStage;
     var srSucceeded = false;
     Future<void> persist(String stage, String label) async {
       if (!imageKey.startsWith('file://')) return;
@@ -328,6 +382,7 @@ class ReaderImageProvider
           outputScale: parameter('anime4KV4OutputScale', 0.0),
           strength: strength,
           backend: backend,
+          forceReprocess: forceReprocess,
           onStatus: onStatus,
         );
       } else {
@@ -338,6 +393,7 @@ class ReaderImageProvider
           pushStrength: parameter('anime4KPushStrength', 0.31),
           pushGradStrength: parameter('anime4KPushGradStrength', 1.0),
           strength: strength,
+          forceReprocess: forceReprocess,
           onStatus: onStatus,
         );
       }
@@ -361,7 +417,7 @@ class ReaderImageProvider
         );
         await persist('super_resolution', 'Super-resolution file');
       } else {
-        incompleteStage =
+        final failure =
             stageStatus ??
             const ImageAiStatus(
               message: 'Super-resolution failed; no processed output',
@@ -372,8 +428,14 @@ class ReaderImageProvider
           values: {
             'Super-resolution': 'Failed',
             'After super-resolution': 'No successful output',
-            'Super-resolution error': incompleteStage.message,
+            'Super-resolution error': failure.message,
           },
+        );
+        throw ImageAiFailure(
+          failure.errorCode ?? 'ai_failed',
+          failure.message,
+          detail: failure.errorDetail,
+          previewBytes: bytes,
         );
       }
     }
@@ -390,6 +452,7 @@ class ReaderImageProvider
         cacheKey: key,
         intensity: parameter('colorizationIntensity', 1.0),
         backend: backend,
+        forceReprocess: forceReprocess,
         onStatus: (value) {
           stageStatus = value;
           details.update(
@@ -425,7 +488,6 @@ class ReaderImageProvider
               message: 'Colorization failed; no processed output',
               isError: true,
             );
-        incompleteStage ??= failure;
         details.update(
           record,
           values: {
@@ -433,20 +495,22 @@ class ReaderImageProvider
             'Colorization error': failure.message,
           },
         );
+        throw ImageAiFailure(
+          failure.errorCode ?? 'ai_failed',
+          failure.message,
+          detail: failure.errorDetail,
+          previewBytes: bytes,
+        );
       }
     }
     details.update(
       record,
-      state: incompleteStage == null ? 'Complete' : 'Incomplete',
+      state: 'Complete',
       values: {
         'Final resolution': finalSize,
         'Final encoded size': '${bytes.length} B',
       },
     );
-    if (incompleteStage != null) {
-      ImageAiService.instance.status.value = incompleteStage;
-      if (requireComplete) throw StateError(incompleteStage.message);
-    }
     return bytes;
   }
 
@@ -470,7 +534,7 @@ class ReaderImageProvider
   }
 
   @override
-  String get key => "$imageKey@$sourceKey@$cid@$eid";
+  String get key => jsonEncode([imageKey, sourceKey, cid, eid, page]);
 
   @override
   bool get enableResize => false;

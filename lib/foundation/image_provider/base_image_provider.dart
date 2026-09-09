@@ -103,6 +103,7 @@ abstract class BaseImageProvider<T extends BaseImageProvider<T>>
         } on _ImageLoadingStopException {
           rethrow;
         } catch (e) {
+          if (!retryLoadFailures) rethrow;
           if (e.toString().contains("Invalid Status Code: 404")) {
             rethrow;
           }
@@ -185,6 +186,9 @@ abstract class BaseImageProvider<T extends BaseImageProvider<T>>
   }
 
   bool get enableResize => false;
+
+  /// Reader queues own retries; other image providers retain network retries.
+  bool get retryLoadFailures => true;
 }
 
 typedef FileDecoderCallback = Future<ui.Codec> Function(Uint8List);

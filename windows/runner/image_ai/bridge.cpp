@@ -1,5 +1,6 @@
 #include "bridge.h"
 #include "engine.h"
+#include "image_memory.h"
 
 #include <flutter/encodable_value.h>
 #include <flutter/method_channel.h>
@@ -18,7 +19,6 @@ using Value = flutter::EncodableValue;
 using Map = flutter::EncodableMap;
 using MethodResult = flutter::MethodResult<Value>;
 constexpr size_t kMaxPending = 8;
-constexpr size_t kMaxQueuedBytes = 128u * 1024u * 1024u;
 
 const Value* Find(const Map& args, const char* key) {
   auto found = args.find(Value(key));
@@ -39,6 +39,12 @@ double Number(const Map& args, const char* key, double fallback) {
   if (const auto number = std::get_if<int32_t>(value)) return *number;
   if (const auto number = std::get_if<int64_t>(value)) return static_cast<double>(*number);
   throw Error("invalid_arguments", std::string(key) + " must be a number.");
+}
+bool Boolean(const Map& args, const char* key, bool fallback = false) {
+  const auto value = Find(args, key);
+  if (!value) return fallback;
+  if (const auto boolean = std::get_if<bool>(value)) return *boolean;
+  throw Error("invalid_arguments", std::string(key) + " must be a boolean.");
 }
 Value OptionalString(const std::string& value) { return value.empty() ? Value() : Value(value); }
 Value Strings(const std::vector<std::string>& values) {
@@ -107,6 +113,9 @@ struct Bridge::Impl {
         } catch (const Error& error) {
           reply.code = error.code;
           reply.message = error.what();
+        } catch (const std::bad_alloc&) {
+          reply.code = "memory_limit";
+          reply.message = "Native image processing ran out of memory.";
         } catch (const std::exception& error) {
           reply.code = "image_ai_failed";
           reply.message = error.what();
@@ -183,10 +192,12 @@ struct Bridge::Impl {
       if (method == "colorize") {
         const auto bytes_value = Find(args, "imageBytes");
         const auto bytes = bytes_value ? std::get_if<std::vector<uint8_t>>(bytes_value) : nullptr;
-        if (!bytes || bytes->empty() || bytes->size() > 64u * 1024u * 1024u) throw Error("invalid_arguments", "imageBytes must contain 1 byte to 64 MiB of encoded image data.");
+        if (!bytes || bytes->empty()) throw Error("invalid_arguments", "imageBytes must contain encoded image data.");
         {
           std::lock_guard<std::mutex> lock(worker->mutex);
-          if (worker->queued_bytes + bytes->size() > kMaxQueuedBytes) throw Error("queue_full", "Queued image bytes exceed the 128 MiB limit.");
+          const auto budget = ImageMemoryBudget() / 4;
+          if (bytes->size() > budget || worker->queued_bytes > budget - bytes->size())
+            throw Error("memory_limit", "Pending encoded images exceed available image memory.");
         }
         job.request.model_id = String(args, "modelId");
         job.request.input_id = String(args, "inputId");
@@ -194,6 +205,7 @@ struct Bridge::Impl {
         job.request.intensity = Number(args, "intensity", 1);
         job.request.strength = Number(args, "strength", 1);
         job.request.output_scale = Number(args, "outputScale", 0);
+        job.request.force_reprocess = Boolean(args, "forceReprocess");
         job.request.image_bytes = *bytes;
       }
       {

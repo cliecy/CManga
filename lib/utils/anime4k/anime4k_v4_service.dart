@@ -81,6 +81,7 @@ class Anime4KV4Service {
     double outputScale = 0.0,
     double strength = 1.0,
     String backend = 'auto',
+    bool forceReprocess = false,
     void Function(ImageAiStatus)? onStatus,
   }) async {
     var reportedFailure = false;
@@ -110,6 +111,7 @@ class Anime4KV4Service {
           'strength': strength,
           'outputScale': outputScale,
         },
+        forceReprocess: forceReprocess,
         onStatus: (value) {
           reportedFailure = value.isError;
           onStatus?.call(value);

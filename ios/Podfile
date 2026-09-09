@@ -26,11 +26,17 @@ require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelpe
 
 flutter_ios_podfile_setup
 
+# Build the native WebGPU/Dawn/Metal dependency before CocoaPods resolves its
+# vendored framework. The content-addressed build cache makes this a no-op later.
+metal_builder = File.expand_path('../native/apple/build_ort_metal.py', __dir__)
+raise 'Failed to build the native Metal runtime' unless system('python3', metal_builder, '--platform', 'ios')
+
 target 'Runner' do
   use_frameworks!
   use_modular_headers!
 
   pod 'VeneraOpenCV', :podspec => '../native/VeneraOpenCV.podspec'
+  pod 'VeneraOnnxRuntime', :path => '../build/apple-ort/ios/package'
   pod 'VeneraImageAI', :path => '../native'
 
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))

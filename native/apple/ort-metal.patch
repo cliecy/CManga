@@ -1,0 +1,156 @@
+--- a/onnxruntime/core/providers/webgpu/webgpu_context.cc
++++ b/onnxruntime/core/providers/webgpu/webgpu_context.cc
+@@ -36,11 +36,50 @@
+ #include "core/providers/webgpu/program_manager.h"
+ #include "core/providers/webgpu/string_macros.h"
+ 
++#include <algorithm>
++#include <atomic>
++#include <cstring>
++#include <mutex>
++
++// Venera's Apple-only runtime: no externally injected or software device can
++// enter the inference context. Keep the selected Dawn adapter's actual name.
++namespace {
++std::mutex venera_metal_mutex;
++std::string venera_metal_name;
++std::string venera_metal_error;
++std::atomic<bool> venera_metal_failed{false};
++void VeneraMetalFailure(std::string message) noexcept {
++  try {
++    std::lock_guard<std::mutex> lock(venera_metal_mutex);
++    if (!venera_metal_failed.load()) venera_metal_error = std::move(message);
++    venera_metal_failed.store(true);
++  } catch (...) {
++    venera_metal_failed.store(true);
++  }
++}
++}
++
++extern "C" __attribute__((visibility("default"))) int VeneraOrtMetalStatus(char* name, size_t name_size,
++                                    char* reason, size_t reason_size) {
++  std::lock_guard<std::mutex> lock(venera_metal_mutex);
++  auto copy = [](char* dest, size_t size, const std::string& text) {
++    if (!dest || !size) return;
++    const size_t count = std::min(size - 1, text.size());
++    std::memcpy(dest, text.data(), count);
++    dest[count] = '\0';
++  };
++  copy(name, name_size, venera_metal_name);
++  copy(reason, reason_size, venera_metal_error);
++  return !venera_metal_name.empty() && !venera_metal_failed.load();
++}
++
+ namespace onnxruntime {
+ namespace webgpu {
+ 
+ void WebGpuContext::Initialize(const WebGpuContextConfig& config) {
+   std::call_once(init_flag_, [this, &config]() {
++    ORT_ENFORCE(!config.compile_only && config.device == nullptr && config.instance == nullptr &&
++                config.dawn_proc_table == nullptr, "Venera requires its own hardware Metal device.");
+     max_num_pending_dispatches_ = config.max_num_pending_dispatches;
+ 
+     // Three easily-conflated concepts, at three layers (a pipeline, not the same flag):
+@@ -60,7 +99,8 @@
+     if (device_ == nullptr) {
+       // Create wgpu::Adapter
+       wgpu::RequestAdapterOptions req_adapter_options = {};
+-      req_adapter_options.backendType = static_cast<wgpu::BackendType>(config.backend_type);
++      req_adapter_options.backendType = wgpu::BackendType::Metal;
++      req_adapter_options.forceFallbackAdapter = false;
+       req_adapter_options.powerPreference = static_cast<wgpu::PowerPreference>(config.power_preference);
+ 
+ #if !defined(__wasm__)
+@@ -101,6 +141,13 @@
+                   "Failed to get a WebGPU adapter: ", adapter_result.message);
+       wgpu::Adapter adapter = std::move(adapter_result.adapter);
+       ORT_ENFORCE(adapter != nullptr, "Failed to get a WebGPU adapter.");
++      wgpu::AdapterInfo metal_info{};
++      ORT_ENFORCE(adapter.GetInfo(&metal_info) == wgpu::Status::Success,
++                  "Failed to inspect the Metal adapter.");
++      ORT_ENFORCE(metal_info.backendType == wgpu::BackendType::Metal &&
++                  (metal_info.adapterType == wgpu::AdapterType::IntegratedGPU ||
++                   metal_info.adapterType == wgpu::AdapterType::DiscreteGPU),
++                  "Venera rejects non-Metal and software/CPU adapters.");
+ 
+       // Create wgpu::Device
+       wgpu::DeviceDescriptor device_desc = {};
+@@ -131,6 +178,7 @@
+           // Note: Don't throw from a Dawn callback.
+           [](const wgpu::Device& /*device*/, wgpu::ErrorType type,
+              wgpu::StringView message) noexcept {
++            VeneraMetalFailure(std::string{message});
+             if (logging::LoggingManager::HasDefaultLogger()) {
+               LOGS_DEFAULT(ERROR) << "WebGPU device error(" << int(type) << "): " << std::string_view{message};
+             }
+@@ -140,6 +188,7 @@
+           wgpu::CallbackMode::AllowSpontaneous,
+           // Note: Don't throw from a Dawn callback.
+           [](const wgpu::Device& /*device*/, wgpu::DeviceLostReason reason, wgpu::StringView message) noexcept {
++            if (reason != wgpu::DeviceLostReason::Destroyed) VeneraMetalFailure(std::string{message});
+             if (logging::LoggingManager::HasDefaultLogger()) {
+               LOGS_DEFAULT(INFO) << "WebGPU device lost (" << int(reason) << "): " << std::string_view{message};
+             }
+@@ -199,6 +248,11 @@
+     }
+ #endif
+     ORT_ENFORCE(Device().GetAdapterInfo(&adapter_info_));
++    {
++      std::lock_guard<std::mutex> lock(venera_metal_mutex);
++      venera_metal_name = std::string{adapter_info_.device};
++      ORT_ENFORCE(!venera_metal_name.empty(), "Metal adapter has no device name.");
++    }
+ 
+     // create buffer manager
+     buffer_mgr_ = BufferManagerFactory::Create(*this,
+@@ -245,7 +299,9 @@
+ }
+ 
+ Status WebGpuContext::Wait(wgpu::Future f) {
++  ORT_RETURN_IF(venera_metal_failed.load(), "Metal device failed; CPU inference is disabled.");
+   auto status = instance_.WaitAny(f, UINT64_MAX);
++  ORT_RETURN_IF(venera_metal_failed.load(), "Metal device failed; CPU inference is disabled.");
+   if (status == wgpu::WaitStatus::Success) {
+     return Status::OK();
+   }
+@@ -351,6 +407,7 @@
+ }
+ 
+ Status WebGpuContext::Run(ComputeContextBase& context, const ProgramBase& program) {
++  ORT_RETURN_IF(venera_metal_failed.load(), "Metal device failed; CPU inference is disabled.");
+   const auto& inputs = program.Inputs();
+   const auto& outputs = program.Outputs();
+ 
+@@ -945,6 +1002,7 @@
+ }
+ 
+ Status WebGpuContext::Flush(const webgpu::BufferManager& buffer_mgr) {
++  ORT_RETURN_IF(venera_metal_failed.load(), "Metal device failed; CPU inference is disabled.");
+   Status status = EncodeDeferredDispatches();
+   if (!current_command_encoder_) {
+     return status;
+--- a/cmake/onnxruntime.cmake
++++ b/cmake/onnxruntime.cmake
+@@ -487,6 +487,8 @@
+       list(REMOVE_DUPLICATES all_link_libraries)
+ 
+       foreach(dependency ${all_link_libraries})
++        # Static libraries commonly expose dependencies through LINK_ONLY.
++        string(REGEX REPLACE "^\\$<LINK_ONLY:([^>]+)>$" "\\1" dependency "${dependency}")
+         if(TARGET ${dependency})
+           process(${dependency})
+         endif()
+@@ -524,6 +526,13 @@
+     endif()
+   endforeach()
+ 
++  # The stock Apple archive collector only walks ORT's external roots. Dawn is
++  # linked through the WebGPU provider instead, so include its static closure.
++  if(onnxruntime_USE_WEBGPU)
++    add_symlink_for_static_lib_and_dependencies(dawn::dawn_native)
++    add_symlink_for_static_lib_and_dependencies(dawn::dawn_proc)
++  endif()
++
+   # do the pre-link with `ld -r` to create a single relocatable object with correct symbol visibility
+   add_custom_command(TARGET onnxruntime POST_BUILD
+                      COMMAND /usr/bin/ld ARGS -r -o ${STATIC_LIB_DIR}/prelinked_objects.o */*.o ../*.a

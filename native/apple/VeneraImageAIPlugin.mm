@@ -1,7 +1,8 @@
 #import "VeneraImageAIPlugin.h"
-#import <ImageIO/ImageIO.h>
 
 #include "../image_ai/engine.h"
+#include "../image_ai/image_memory.h"
+#include "metal_provider.h"
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -10,14 +11,8 @@
 namespace {
 #if TARGET_OS_IOS
 constexpr NSUInteger kMaxPending = 4;
-constexpr NSUInteger kMaxQueuedBytes = 32u * 1024u * 1024u;
-constexpr NSUInteger kMaxEncodedBytes = 16u * 1024u * 1024u;
-constexpr int64_t kMaxPixels = 4ll * 1024 * 1024;
 #else
 constexpr NSUInteger kMaxPending = 8;
-constexpr NSUInteger kMaxQueuedBytes = 128u * 1024u * 1024u;
-constexpr NSUInteger kMaxEncodedBytes = 64u * 1024u * 1024u;
-constexpr int64_t kMaxPixels = 24ll * 1024 * 1024;
 #endif
 
 NSString* Text(const std::string& value) {
@@ -49,25 +44,18 @@ double Number(NSDictionary* args, NSString* key, double fallback) {
   }
   return [value doubleValue];
 }
+bool Boolean(NSDictionary* args, NSString* key, bool fallback = false) {
+  id value = args[key];
+  if (!value) return fallback;
+  if (CFGetTypeID((__bridge CFTypeRef)value) != CFBooleanGetTypeID()) {
+    throw image_ai::Error("invalid_arguments", std::string(key.UTF8String) + " must be a boolean.");
+  }
+  return [value boolValue];
+}
 FlutterError* Failure(const char* code, const char* message) {
   return [FlutterError errorWithCode:Text(code) message:Text(message) details:nil];
 }
 
-// Reading metadata before OpenCV decodes prevents compressed images from first
-// allocating an unbounded raster. No orientation or color transformation occurs.
-void CheckImage(NSData* bytes) {
-  CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)bytes, nullptr);
-  if (!source) throw image_ai::Error("invalid_image", "Image metadata could not be decoded.");
-  NSDictionary* properties = CFBridgingRelease(CGImageSourceCopyPropertiesAtIndex(source, 0, nullptr));
-  CFRelease(source);
-  const int64_t width = [properties[(__bridge NSString*)kCGImagePropertyPixelWidth] longLongValue];
-  const int64_t height = [properties[(__bridge NSString*)kCGImagePropertyPixelHeight] longLongValue];
-  if (width < 1 || height < 1) throw image_ai::Error("invalid_image", "Image dimensions are unavailable.");
-  if (width > kMaxPixels || height > kMaxPixels || width * height > kMaxPixels) {
-    throw image_ai::Error("image_too_large", "Image exceeds this platform's " +
-        std::to_string(kMaxPixels / (1024 * 1024)) + " megapixel memory limit; resize it explicitly before processing.");
-  }
-}
 
 struct ModelAccess {
   NSURL* __strong url = nil;
@@ -221,11 +209,12 @@ struct Job {
         throw image_ai::Error("invalid_arguments", "imageBytes must be Uint8List encoded image data.");
       }
       job->bytes = [(FlutterStandardTypedData*)typed data];
-      if (job->bytes.length < 1 || job->bytes.length > kMaxEncodedBytes) {
-        throw image_ai::Error("invalid_arguments", "imageBytes must contain 1 byte to " + std::to_string(kMaxEncodedBytes / (1024 * 1024)) + " MiB of encoded image data.");
+      if (!job->bytes.length) {
+        throw image_ai::Error("invalid_arguments", "imageBytes must contain encoded image data.");
       }
-      if (job->bytes.length > kMaxQueuedBytes - _pendingBytes) {
-        throw image_ai::Error("queue_full", "Queued image bytes exceed the native memory limit.");
+      const auto budget = image_ai::ImageMemoryBudget() / 4;
+      if (job->bytes.length > budget || _pendingBytes > budget - job->bytes.length) {
+        throw image_ai::Error("memory_limit", "Pending encoded images exceed available image memory.");
       }
       job->request.model_id = String(args, @"modelId");
       job->request.input_id = String(args, @"inputId");
@@ -233,6 +222,7 @@ struct Job {
       job->request.intensity = Number(args, @"intensity", 1);
       job->request.strength = Number(args, @"strength", 1);
       job->request.output_scale = Number(args, @"outputScale", 0);
+      job->request.force_reprocess = Boolean(args, @"forceReprocess");
     }
     const NSUInteger bytes = job->bytes.length;
     const uint64_t generation = _worker->generation;
@@ -249,7 +239,8 @@ struct Job {
           if ([method isEqualToString:@"getCapabilities"]) {
             const auto caps = engine->GetCapabilities();
             reply = @{@"supported": @(caps.supported), @"types": Strings(caps.types),
-                      @"backends": Strings(caps.backends), @"reason": OptionalText(caps.reason)};
+                      @"backends": Strings(caps.backends), @"reason": OptionalText(caps.reason),
+                      @"device": caps.supported ? Text(image_ai::AppleMetalDeviceName()) : [NSNull null]};
           } else if ([method isEqualToString:@"resetSession"]) {
             // Reset must also work after the model file was removed.
             engine->Reset(job->request.model_path);
@@ -260,7 +251,6 @@ struct Job {
               reply = @{@"channels": @(info.channels), @"scale": @(info.scale),
                         @"inputWidth": @(info.input_width), @"inputHeight": @(info.input_height)};
             } else {
-              CheckImage(job->bytes);
               const auto* begin = static_cast<const uint8_t*>(job->bytes.bytes);
               job->request.image_bytes.assign(begin, begin + job->bytes.length);
               job->bytes = nil;
@@ -270,7 +260,8 @@ struct Job {
                   length:output->image_bytes.size() deallocator:^(void*, NSUInteger) { (void)output; }];
               reply = @{@"imageBytes": [FlutterStandardTypedData typedDataWithBytes:encoded],
                         @"backend": Text(output->backend), @"scale": @(output->scale),
-                        @"cacheHit": @(output->cache_hit), @"fallbackReason": OptionalText(output->fallback_reason)};
+                        @"cacheHit": @(output->cache_hit), @"fallbackReason": OptionalText(output->fallback_reason),
+                        @"device": Text(image_ai::AppleMetalDeviceName())};
             }
           }
         } catch (const image_ai::Error& error) {

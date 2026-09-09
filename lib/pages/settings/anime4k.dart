@@ -293,6 +293,13 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
             ),
           ),
         ),
+        if (App.isMacOS || App.isIOS)
+          ListTile(
+            subtitle: Text(
+              'On macOS and iOS, v4 AI requires a compatible model and uses Metal GPU only, without CPU inference fallback. v1 is a non-neural CPU algorithm. Linux is not supported.'
+                  .tl,
+            ),
+          ).toSliver(),
       ],
       // v4 模型（倍数）选择：4x 动画 / 2x 通用
       if (isV4 || widget.modelsOnly)

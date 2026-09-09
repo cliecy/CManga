@@ -7,7 +7,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as path;
-import 'package:path_provider/path_provider.dart';
+import 'image_ai_cache.dart';
 
 @immutable
 class ImageAiStatus {
@@ -16,6 +16,8 @@ class ImageAiStatus {
   final bool isError;
   final bool isProcessing;
   final bool cacheHit;
+  final String? errorCode;
+  final String? errorDetail;
 
   const ImageAiStatus({
     required this.message,
@@ -23,10 +25,32 @@ class ImageAiStatus {
     this.isError = false,
     this.isProcessing = false,
     this.cacheHit = false,
+    this.errorCode,
+    this.errorDetail,
   });
 }
 
-/// The shared native AI protocol, model identities, and bounded work queue.
+class ImageAiFailure implements Exception {
+  const ImageAiFailure(
+    this.code,
+    this.message, {
+    this.detail,
+    this.previewBytes,
+  });
+
+  final String code;
+  final String message;
+  final String? detail;
+  final Uint8List? previewBytes;
+
+  bool get isResourceLimit =>
+      code == 'image_too_large' || code == 'memory_limit';
+
+  @override
+  String toString() => message;
+}
+
+/// Shared native AI protocol, model identities and serial native operations.
 /// Native code retains unrendered inference results; Dart caches rendered PNGs.
 class ImageAiService {
   ImageAiService._();
@@ -42,6 +66,7 @@ class ImageAiService {
   bool get isSupported => _capabilities['supported'] == true;
   Future<bool>? _initializing;
   String? _cacheDirectory;
+  final _cache = ImageAiCache.instance;
   final _identities = <String, ({String signature, String id})>{};
   final _modelInfo = <String, Map<String, dynamic>>{};
   final _hashing = <String, Future<String>>{};
@@ -49,23 +74,44 @@ class ImageAiService {
   final _inFlight = <String, Future<Map<String, dynamic>>>{};
   final _queue = Queue<Future<void> Function()>();
   bool _running = false;
-  int _queuedBytes = 0;
   int _generation = 0;
-  static const _maxQueuedRequests = 16;
-  static const _maxQueuedBytes = 128 * 1024 * 1024;
-  static const _maxDiskBytes = 256 * 1024 * 1024;
 
   void reportError(Object error, {String? operation}) {
     final detail = error is PlatformException
         ? (error.message ?? error.code)
         : error.toString();
+    final code = error is PlatformException
+        ? error.code.toLowerCase()
+        : error is ImageAiFailure
+        ? error.code
+        : null;
+    final resourceLimited = code == 'image_too_large' || code == 'memory_limit';
     status.value = ImageAiStatus(
-      message: '${operation == null ? '' : '$operation: '}$detail',
+      message: resourceLimited
+          ? 'This comic has very large images; super-resolution is not recommended.'
+          : '${operation == null ? '' : '$operation: '}$detail',
       isError: true,
+      errorCode: code,
+      errorDetail: resourceLimited ? detail : null,
     );
   }
 
-  Future<bool> init() => _initializing ??= _initialize();
+  Future<bool> init() => _initializing ??= _initialize().then((supported) {
+    if (!supported) _initializing = null;
+    return supported;
+  });
+
+  String resolveBackend(String backend) {
+    if (backend != 'auto' && backend != 'cpu' && backend != 'metal') {
+      throw ArgumentError('Unknown AI backend: $backend');
+    }
+    // Old persisted CPU selections migrate to the user's Apple GPU policy.
+    if (Platform.isMacOS || Platform.isIOS) return 'metal';
+    if (backend == 'metal') {
+      throw UnsupportedError('Metal is available only on Apple devices');
+    }
+    return backend;
+  }
 
   Future<bool> _initialize() async {
     if (!Platform.isWindows &&
@@ -93,9 +139,7 @@ class ImageAiService {
         reportError(_capabilities['reason'] ?? 'Native AI is unavailable');
         return false;
       }
-      final temporary = await getTemporaryDirectory();
-      _cacheDirectory = path.join(temporary.path, 'image_ai_cache_v2');
-      await Directory(_cacheDirectory!).create(recursive: true);
+      _cacheDirectory = await _cache.directory();
       status.value = const ImageAiStatus(
         message: 'AI backend available; select a compatible model',
       );
@@ -210,22 +254,15 @@ class ImageAiService {
     }
   }
 
-  Future<T> _serial<T>(Future<T> Function() operation, {int bytes = 0}) {
-    if (_queue.length >= _maxQueuedRequests ||
-        _queuedBytes + bytes > _maxQueuedBytes) {
-      return Future.error(
-        StateError('AI request queue is full; try this page again'),
-      );
-    }
+  Future<T> _serial<T>(Future<T> Function() operation) {
+    // The reader admits pixel work one page at a time. Metadata and callers
+    // wait their turn instead of turning a full queue into a lost page.
     final completer = Completer<T>();
-    _queuedBytes += bytes;
     _queue.add(() async {
       try {
         completer.complete(await operation());
       } catch (error, stack) {
         completer.completeError(error, stack);
-      } finally {
-        _queuedBytes -= bytes;
       }
     });
     _drain();
@@ -247,6 +284,7 @@ class ImageAiService {
   Future<Map<String, dynamic>> process(
     Map<String, dynamic> arguments, {
     void Function(ImageAiStatus)? onStatus,
+    bool forceReprocess = false,
   }) async {
     var operation = 'AI processing failed';
     try {
@@ -261,16 +299,14 @@ class ImageAiService {
       await getModelInfo(modelPath, type);
       final modelSignature = _identities[modelPath]?.signature;
       final inputId = sha256.convert(bytes).toString();
-      final backend = arguments['backend'] as String? ?? 'auto';
-      if (backend != 'auto' && backend != 'cpu') {
-        throw ArgumentError('Unknown AI backend: $backend');
-      }
+      final backend = resolveBackend(arguments['backend'] as String? ?? 'auto');
       final nativeArgs = <String, dynamic>{
         ...arguments,
         'modelId': id,
         'inputId': inputId,
         'backend': backend,
         'cacheDirectory': _cacheDirectory!,
+        'forceReprocess': forceReprocess,
       };
       // Exact doubles, not display rounding. Upstream SR changes alter inputId.
       final key = sha256
@@ -290,7 +326,7 @@ class ImageAiService {
           )
           .toString();
       final generation = _generation;
-      final requestKey = '$generation:$key';
+      final requestKey = '$generation:$key:$forceReprocess';
       final active = _inFlight[requestKey];
       if (active != null) {
         final result = await active;
@@ -308,26 +344,21 @@ class ImageAiService {
             'AI model changed while this page was queued; reload the page',
           );
         }
-        final cache = File(path.join(_cacheDirectory!, '${type}_$key.json'));
-        final image = File(path.join(_cacheDirectory!, '${type}_$key.png'));
-        if (await cache.exists() && await image.exists()) {
-          try {
-            final metadata = Map<String, dynamic>.from(
-              jsonDecode(await cache.readAsString()) as Map,
-            );
-            final result = <String, dynamic>{
-              ...metadata,
-              'imageBytes': await image.readAsBytes(),
-              'cacheHit': true,
-              'renderedCacheHit': true,
-            };
-            status.value = _resultStatus(result, operation);
-            return result;
-          } on FileSystemException {
-            // Eviction or interrupted cache writes do not prevent inference.
-          } on FormatException {
-            await cache.delete();
-          }
+        final cached = forceReprocess ? null : await _cache.read(type, key);
+        if (cached != null &&
+            cached.metadata['backend'] is String &&
+            cached.metadata['scale'] is int &&
+            (backend != 'metal' ||
+                cached.metadata['backend'] == 'metal' ||
+                cached.metadata['backend'] == 'none')) {
+          final result = <String, dynamic>{
+            ...cached.metadata,
+            'imageBytes': cached.bytes,
+            'cacheHit': true,
+            'renderedCacheHit': true,
+          };
+          status.value = _resultStatus(result, operation);
+          return result;
         }
         status.value = ImageAiStatus(
           message: '$operation: processing',
@@ -345,24 +376,31 @@ class ImageAiService {
             result['cacheHit'] is! bool) {
           throw StateError('Native AI returned an invalid image result');
         }
+        if (backend == 'metal' &&
+            result['backend'] != 'metal' &&
+            result['backend'] != 'none') {
+          throw const ImageAiFailure(
+            'backend_unavailable',
+            'Apple AI requires Metal GPU inference; CPU fallback is disabled.',
+          );
+        }
         if (generation == _generation) {
           try {
-            await image.writeAsBytes(
+            await _cache.write(
+              type,
+              key,
               result['imageBytes'] as Uint8List,
-              flush: true,
+              metadata: {...result}..remove('imageBytes'),
             );
-            await cache.writeAsString(
-              jsonEncode({...result}..remove('imageBytes')),
-              flush: true,
-            );
-            await _trimCache();
-          } on FileSystemException {
-            // A full/unwritable temporary disk must not discard a real result.
+          } on FileSystemException catch (error) {
+            // Preserve real output, but do not claim it will survive reopening.
+            result['cacheWarning'] =
+                'Processed output could not be cached: $error';
           }
         }
         status.value = _resultStatus(result, operation);
         return result;
-      }, bytes: bytes.length);
+      });
       _inFlight[requestKey] = future;
       try {
         final result = await future;
@@ -391,52 +429,19 @@ class ImageAiService {
               : backend == 'none'
               ? 'Base image rendered; inference skipped'
               : 'AI processed'}'
-          '${backend == 'none' ? '' : ' ($backend)'}${fallback == null ? '' : ' — $fallback'}',
+          '${backend == 'none' ? '' : ' ($backend)'}${fallback == null ? '' : ' — $fallback'}'
+          '${result['cacheWarning'] == null ? '' : ' — ${result['cacheWarning']}'}',
       backend: backend,
       cacheHit: hit,
     );
   }
 
-  Future<void> _trimCache() async {
-    final files = <({File file, FileStat stat})>[];
-    var size = 0;
-    await for (final entity in Directory(_cacheDirectory!).list()) {
-      if (entity is File) {
-        final stat = await entity.stat();
-        files.add((file: entity, stat: stat));
-        size += stat.size;
-      }
-    }
-    files.sort((a, b) => a.stat.modified.compareTo(b.stat.modified));
-    for (final entry in files) {
-      if (size <= _maxDiskBytes) break;
-      await entry.file.delete();
-      size -= entry.stat.size;
-    }
-  }
-
   Future<void> clearRenderedCache(String type) async {
     _generation++;
-    if (_cacheDirectory == null) return;
-    await _serial(() async {
-      await for (final entry in Directory(_cacheDirectory!).list()) {
-        if (entry is File && path.basename(entry.path).startsWith('${type}_')) {
-          await entry.delete();
-        }
-      }
-    });
+    await _serial(() => _cache.clear(type));
   }
 
-  Future<int> cacheSize(String type) async {
-    if (_cacheDirectory == null) return 0;
-    var total = 0;
-    await for (final entry in Directory(_cacheDirectory!).list()) {
-      if (entry is File && path.basename(entry.path).startsWith('${type}_')) {
-        total += await entry.length();
-      }
-    }
-    return total;
-  }
+  Future<int> cacheSize(String type) => _cache.size(type);
 
   Future<void> resetSession() async {
     _generation++;

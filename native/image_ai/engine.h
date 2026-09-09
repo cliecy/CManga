@@ -42,6 +42,7 @@ struct Request {
   double intensity = 1.0;
   double strength = 1.0;
   double output_scale = 0.0;
+  bool force_reprocess = false;
 };
 
 struct Result {

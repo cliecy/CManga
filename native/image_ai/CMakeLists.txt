@@ -1,34 +1,37 @@
-cmake_minimum_required(VERSION 3.18)
-project(venera_image_ai_smoke LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.22)
+project(venera_image_ai_smoke LANGUAGES CXX OBJCXX)
 if(NOT APPLE OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
   message(FATAL_ERROR "This standalone smoke target is macOS-only; Windows uses windows/cmake/ImageAiTarget.cmake")
 endif()
 
-# OpenCV_DIR/CMAKE_PREFIX_PATH and VENERA_ORT_ROOT can select exact dependencies
-# instead of host packages. ORT_INCLUDE_DIR/ORT_LIBRARY also accept an extracted
-# official CocoaPods framework's Headers and onnxruntime.framework binary.
-set(VENERA_ORT_ROOT "" CACHE PATH "ONNX Runtime install or extracted framework root")
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs)
-find_path(ORT_INCLUDE_DIR onnxruntime_c_api.h
-  HINTS "${VENERA_ORT_ROOT}" /opt/homebrew/opt/onnxruntime /usr/local/opt/onnxruntime
-  PATH_SUFFIXES include include/onnxruntime include/onnxruntime/core/session Headers)
-find_library(ORT_LIBRARY NAMES onnxruntime
-  HINTS "${VENERA_ORT_ROOT}" /opt/homebrew/opt/onnxruntime /usr/local/opt/onnxruntime
-  PATH_SUFFIXES lib)
-if(NOT ORT_INCLUDE_DIR OR NOT ORT_LIBRARY)
-  message(FATAL_ERROR "Set VENERA_ORT_ROOT or ORT_INCLUDE_DIR/ORT_LIBRARY to a real ONNX Runtime installation")
+get_filename_component(VENERA_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
+# Do not find a host ORT: the Homebrew/CocoaPods CPU-only builds cannot satisfy
+# the hardware-only Metal contract, even when their headers mention WebGPU.
+execute_process(
+  COMMAND "${Python3_EXECUTABLE}" "${VENERA_ROOT}/native/apple/build_ort_metal.py" --platform macos
+  RESULT_VARIABLE VENERA_ORT_BUILD_RESULT
+  COMMAND_ERROR_IS_FATAL ANY)
+set(ORT_FRAMEWORK "${VENERA_ROOT}/build/apple-ort/macos/package/onnxruntime.xcframework/macos-arm64_x86_64/onnxruntime.framework")
+if(NOT EXISTS "${ORT_FRAMEWORK}/onnxruntime")
+  message(FATAL_ERROR "The pinned Metal XCFramework was not produced")
 endif()
-add_library(venera_image_ai STATIC engine.cpp)
+add_library(venera_image_ai STATIC engine.cpp image_memory.cpp ../apple/metal_provider.mm)
+set_source_files_properties(../apple/metal_provider.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 target_compile_features(venera_image_ai PUBLIC cxx_std_17)
 target_include_directories(venera_image_ai PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
-target_include_directories(venera_image_ai SYSTEM PRIVATE "${ORT_INCLUDE_DIR}" ${OpenCV_INCLUDE_DIRS})
-# Official static ORT Apple archives contain Foundation/CoreML references even
-# when the application selects CPU. Dynamic Homebrew builds resolve these inside
-# the dylib, but extracted XCFrameworks need the host to link them explicitly.
+target_include_directories(venera_image_ai SYSTEM PRIVATE "${ORT_FRAMEWORK}/Headers" ${OpenCV_INCLUDE_DIRS})
 find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
-find_library(COREML_FRAMEWORK CoreML REQUIRED)
-target_link_libraries(venera_image_ai PRIVATE "${ORT_LIBRARY}" ${OpenCV_LIBS}
-  "${FOUNDATION_FRAMEWORK}" "${COREML_FRAMEWORK}")
+find_library(METAL_FRAMEWORK Metal REQUIRED)
+find_library(QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
+find_library(IOSURFACE_FRAMEWORK IOSurface REQUIRED)
+find_library(IOKIT_FRAMEWORK IOKit REQUIRED)
+find_library(IMAGEIO_FRAMEWORK ImageIO REQUIRED)
+find_library(NETWORK_FRAMEWORK Network REQUIRED)
+target_link_libraries(venera_image_ai PRIVATE "${ORT_FRAMEWORK}/onnxruntime" ${OpenCV_LIBS}
+  "${FOUNDATION_FRAMEWORK}" "${METAL_FRAMEWORK}" "${QUARTZCORE_FRAMEWORK}"
+  "${IOSURFACE_FRAMEWORK}" "${IOKIT_FRAMEWORK}" "${IMAGEIO_FRAMEWORK}" "${NETWORK_FRAMEWORK}")
 add_executable(venera_image_ai_smoke smoke.cpp)
 target_compile_features(venera_image_ai_smoke PRIVATE cxx_std_17)
 target_include_directories(venera_image_ai_smoke SYSTEM PRIVATE ${OpenCV_INCLUDE_DIRS})

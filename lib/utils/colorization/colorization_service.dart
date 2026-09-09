@@ -58,6 +58,7 @@ class ColorizationService {
     required String cacheKey,
     double intensity = 1.0,
     String backend = 'auto',
+    bool forceReprocess = false,
     void Function(ImageAiStatus)? onStatus,
   }) async {
     var reportedFailure = false;
@@ -87,6 +88,7 @@ class ColorizationService {
           'strength': 1.0,
           'outputScale': 0.0,
         },
+        forceReprocess: forceReprocess,
         onStatus: (value) {
           reportedFailure = value.isError;
           onStatus?.call(value);
