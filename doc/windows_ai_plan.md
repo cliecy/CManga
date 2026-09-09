@@ -22,6 +22,8 @@ Windows 已接入本地 ACNet / Real-ESRGAN 超分和多种上色管线，Androi
 | `lib/utils/processed_image_store.dart` | 内容寻址的分类 PNG 保存，不覆盖源页和先前结果 |
 | `lib/foundation/image_provider/reader_image_details.dart`、`lib/pages/reader/image_details.dart` | 逐页实际状态与尺寸、旧设置失效标记、当前页高亮和跳转 |
 | `lib/utils/local_comic_export.dart`、`cbz.dart`、`epub.dart`、`pdf.dart` | 主 isolate 完成当前设置下的页面处理，再生成显式整书导出 |
+| `lib/foundation/image_provider/reader_preloader.dart` | 有界预加载窗口、后台完整处理、切页/切参取消及阶段缓存预热 |
+| `lib/utils/model_download.dart`、模型管理器、阅读设置侧栏 | 独立于页面生命周期的共享下载任务、字节进度及校验/安装/失败状态 |
 
 ### 原生与后端
 
@@ -42,7 +44,7 @@ Windows 使用 C++ + ONNX Runtime + OpenCV，经现有 `com.github.kiastr.venera
 | `deoldify` / `deoldify-int8` | 保留现有 float32 NCHW RGB 0–255 → RGB 包装及亮度处理；标准约 243 MiB，int8 为实验性轻量变体 | [instant-high ONNX](https://github.com/instant-high/deoldify-onnx)、[Kiastr int8](https://github.com/Kiastr/AiColorize/releases/tag/models)；再分发前核对发布者和上游许可。int8 指内部量化，不是任意 int8 输入契约。 |
 | `anime_deoldify` | 约 423 MB；固定 256² float32 RGB 0–255，原始归一化在图内 | 从 [Dakini AnimeColorDeOldify](https://github.com/Dakini/AnimeColorDeOldify) 的 Grayscale2Color 权重转换，[模型与转换来源发布](https://github.com/cliecy/Venera-SSR/releases/tag/image-ai-models-20260909)。Dakini 声明其训练权重为 MIT。应用保留原图 Lab L、透明度和尺寸，不逐像素复刻上游 YUV 滤镜。 |
 | `ddcolor` | 约 980 MB；256² 中性 Lab 派生 RGB 0–1 → 两通道 Lab ab，保留原 L、透明度和尺寸 | [FaceFusion Artistic ONNX](https://huggingface.co/facefusion/models-3.0.0)，[piddnad/DDColor](https://github.com/piddnad/DDColor) 上游 Apache-2.0；FaceFusion 聚合仓库未为该导出单独声明许可。支持该模型协议，不承诺任意 DDColor 导出兼容。 |
-| `manga_light` | 约 191 MB；512² 灰度 [-1,1] → RGB [-1,1]，保留原 L、透明度和尺寸 | [sharky172](https://huggingface.co/sharky172/manga-light-colorizer)，CC BY-NC-SA 4.0，下载前须确认非商业限制；署名及同许可要求仍适用。**仅生成器**：`sam_level0 [1,256,32,32]`、`sam_level1 [1,256,16,16]`、`wd14_embedding [1,1024]` 全部置零，不运行 SAM/WD14，不提供其语义引导，不等同完整上游管线。 |
+| `manga_light`（Manga Light Colorizer V6） | 约 191 MB；512² 灰度 [-1,1] → RGB [-1,1]，保留原 L、透明度和尺寸 | [sharky172 固定版本](https://huggingface.co/sharky172/manga-light-colorizer/tree/2fb022c4ce55632b7671a1df306f63984928e36a) 的 `v6_generator.onnx`，SHA-256 `48284fcf0b7a606270702630f559af88eecf95bc6cdec1ff8bce8663d12b4bb6`。原选项已使用此 V6 权重，仅明确版本名，不增加重复模型。CC BY-NC-SA 4.0，须确认非商业限制并遵守署名、同许可要求。**仅生成器**：`sam_level0 [1,256,32,32]`、`sam_level1 [1,256,16,16]`、`wd14_embedding [1,1024]` 全部置零，不运行 SAM/WD14，不提供其语义引导，不等同完整上游管线。 |
 | `manga_v2` | 约 61 MB；float32 `[1,5,H,W]`，第一通道为 RGB 的首通道 0–1，其余提示/掩码置零；长边适配 512，补齐至 32 的倍数；输出 RGB 0–1 后保留原 L、透明度和尺寸 | **仅本地导入**。[Faridzar 导出](https://huggingface.co/Faridzar/manga-colorization-v2-onnx) 标 MIT，但 [qweasdd 上游](https://github.com/qweasdd/manga-colorization-v2) 权重许可未核实，商业使用与再分发未澄清；不提供默认下载或自定义镜像绕过。 |
 
 超分来源为 [Anime4KCPP / ACNet](https://github.com/TianZerL/Anime4KCPP)、[Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) 及 [SceneWorks 固定版本 ONNX](https://huggingface.co/SceneWorks/real-esrgan-onnx/tree/09f741bac80a246b407da3ee902bf5f3291b602f)。x2plus/x4plus 各约 67 MB，RGB 0–1 的 23-block RRDB 通用模型；遵守 BSD-3-Clause 的版权、许可和免责声明要求。它们比 ACNet 慢且更占内存，并非漫画专用，GAN 可能重绘细节；x4plus 不是 x4plus-anime-6B。旧的无可用发布 `general_x2` 选择迁移为 x2plus，但不会把旧文件冒认为新的权重。
@@ -56,6 +58,14 @@ Windows 使用 C++ + ONNX Runtime + OpenCV，经现有 `com.github.kiastr.venera
 - 颜色浓度 0–120%、步进 1%；0% 中性色度、100% 模型预测色度、120% 额外增艳，不改变图像尺寸或给模型指定配色。0% 不保证逐字节还原原图，关闭功能才完全跳过该阶段。
 - 纯倍率/强度/对比度修改复用仍在缓存的基础推理；强度为零且无基础缓存时跳过无贡献的推理。超分改变下游像素时，上色必须重新推理，不能复用错误输入的结果。
 - 开关、模型和参数变化沿现有图片缓存刷新路径失效；逐页元数据也标为旧设置，旧异步结果不覆盖新页记录。
+
+### 完整预加载与阅读侧栏模型管理
+
+- 画廊/连续阅读都使用当前漫画的预加载数量；窗口替换而非不断累积队列，单个后台任务完成源图加载及所有启用阶段。预热编码阶段缓存，不把整个窗口的解码位图常驻内存；原生推理仍受已有串行队列和内存限制。
+- 翻页复用已完成的阶段结果；模型、参数或窗口变化使旧工作在阶段边界停止。正在执行的原生算子不强行中断。图片消费者离开时取消等待，正常解码仍交付、晚到的解码资源释放、真实加载失败仍传给有效消费者，不把正常取消当成图片错误。
+- 修复整数设置被通用滑块写成 double 的根因，并规范化旧 JSON 中的全局及漫画专属整数值；AI 倍率/强度等小数设置不被截断。
+- 阅读侧栏直接复用原有模型管理组件；选择是全局的，参数仍遵循漫画覆盖优先级。安装完成后即使发起页面已销毁，也刷新模型服务、当前图片和预加载窗口。
+- 每类模型管理器共享一个在途下载 Future，重开页面或重复点击不启动第二次传输。实际字节、未知总量、SHA 校验、原生安装、完成和失败分别可观察；100% 字节不等于已经安装完成。状态独立于设置页面，但不保证跨进程继续传输。
 
 ## 阅读、保存与显式导出
 
@@ -85,7 +95,9 @@ Windows 使用 C++ + ONNX Runtime + OpenCV，经现有 `com.github.kiastr.venera
 | Android 六个新增模型 | 四个上色模型与 x2plus/x4plus 两个超分模型的 CPU 强度 0 / 1 / 0.35 及缓存路径通过；不据此宣称 GPU 上色或所有设备内存均可用。 |
 | 图片信息面板状态恢复 | 修复展开状态与可选文本滚动状态的存储键冲突；真实 Windows 窗口验证第二页首次展开、反复折叠/展开、滚动与跳页后重新打开，不再出现 bool 转 double 的异常。 |
 | Windows 正式服务/导出链路 | 六个新增模型逐一经安装校验、目录选择和 ReaderImageProvider 导出成功；上色保留 127×129，两个超分模型最终 1.30× 输出 165×168。自定义脚本去除原始字节头后可正常解码，源尺寸显示未知而最终尺寸实测正确。 |
-| 现有回归与静态检查 | `anime4k_test.dart`、`channel_test.dart` 共 13 项通过；全量 Dart 检查仅保留两处既有 TickerMode.of 弃用提示，本次三处修复的定向检查无诊断。 |
+| 完整预加载与侧栏模型管理 | Windows 合成 127×129 页面，停在第一页时前五页已完成 ACNet → V6；1.30× 输出 165×168。侧栏切换并下载动画 Real-ESRGAN 后，发起页面已关闭仍刷新预加载。第五页两阶段命中结果缓存；1.75× 改为 222×226，超分复用基础推理、上色按新输入重算。画廊及连续模式快速切参、滚动后无框架异常。 |
+| 模型下载生命周期 | 本机 HTTP 实际传输 Real-ESRGAN 和 191,335,312 字节 V6 权重；每类重复调用返回同一 Future、只产生一次请求。实际窗口验证退出/重开侧栏进度持续，未知总量不伪造百分比。V6 SHA 校验及原生安装期间保持 active；HTTP 503、不兼容 ONNX 和 SHA 不匹配保留失败状态与原有有效模型摘要。 |
+| 现有回归与静态检查 | 整数设置、预加载窗口/失效、图片取消/正常解码/真实错误、Anime4K 与通道共 21 项回归通过。 |
 
 以下保留为验收要求，而非全部已通过的清单：
 

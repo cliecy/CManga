@@ -9,7 +9,10 @@ part of 'settings_page.dart';
 ///
 /// 两版本并存，由 `anime4KVersion` 设置选择；v4 选中时显示模型管理卡片，并隐藏 v1 专用滑块。
 class Anime4KSettings extends StatefulWidget {
-  const Anime4KSettings({super.key});
+  const Anime4KSettings({super.key, this.modelsOnly = false});
+
+  /// Render model management slivers inside the reader's settings viewport.
+  final bool modelsOnly;
 
   @override
   State<Anime4KSettings> createState() => _Anime4KSettingsState();
@@ -17,31 +20,51 @@ class Anime4KSettings extends StatefulWidget {
 
 class _Anime4KSettingsState extends State<Anime4KSettings> {
   bool _isModelDownloaded = false;
-  bool _isDownloading = false;
-  double _downloadProgress = 0.0;
-  String _status = '';
+  bool get _isDownloading =>
+      Anime4KV4ModelManager.downloadState.value?.isDownloading ?? false;
   String? _customModelName;
   List<String> _modelUrls = [];
   bool _usingCustom = false;
-  bool _isManaging = false;
-  bool get _busy => _isDownloading || _isManaging;
+  static final ValueNotifier<bool> _modelManagementBusy = ValueNotifier(false);
+  bool _loadingModelStatus = true;
+  bool get _busy =>
+      _isDownloading || _modelManagementBusy.value || _loadingModelStatus;
 
   Future<void> _manageModel(Future<void> Function() action) async {
     if (_busy) return;
-    setState(() => _isManaging = true);
+    _modelManagementBusy.value = true;
     try {
       await action();
     } catch (e) {
       if (mounted) context.showMessage(message: e.toString());
     } finally {
-      if (mounted) setState(() => _isManaging = false);
+      _modelManagementBusy.value = false;
     }
   }
 
   @override
   void initState() {
     super.initState();
-    _manageModel(_refreshModelStatus);
+    Anime4KV4ModelManager.downloadState.addListener(_downloadChanged);
+    _modelManagementBusy.addListener(_managementChanged);
+    _refreshModelStatus();
+  }
+
+  @override
+  void dispose() {
+    Anime4KV4ModelManager.downloadState.removeListener(_downloadChanged);
+    _modelManagementBusy.removeListener(_managementChanged);
+    super.dispose();
+  }
+
+  void _downloadChanged() {
+    if (!_isDownloading) _refreshModelStatus();
+    if (mounted) setState(() {});
+  }
+
+  void _managementChanged() {
+    if (!_modelManagementBusy.value) _refreshModelStatus();
+    if (mounted) setState(() {});
   }
 
   Future<void> _refreshModelStatus() async {
@@ -55,6 +78,7 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
         _modelUrls = urls;
         _isModelDownloaded = downloaded;
         _usingCustom = usingCustom;
+        _loadingModelStatus = false;
       });
     }
   }
@@ -80,30 +104,10 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
 
   Future<void> _downloadModel() async {
     if (_isDownloading) return;
-    setState(() {
-      _isDownloading = true;
-      _downloadProgress = 0.0;
-      _status = 'Preparing...';
-    });
+    // The manager owns transfer state; this future outlives the settings widget.
 
     try {
-      await Anime4KV4ModelManager.downloadModel(
-        onProgress: (progress) {
-          if (mounted) {
-            setState(() {
-              _downloadProgress = progress;
-              _status = 'Downloading ${(progress * 100).toStringAsFixed(1)}%';
-            });
-          }
-        },
-        onStatus: (status) {
-          if (mounted) {
-            setState(() {
-              _status = status;
-            });
-          }
-        },
-      );
+      await Anime4KV4ModelManager.downloadModel();
       if (mounted) {
         context.showMessage(message: "Model downloaded".tl);
       }
@@ -112,17 +116,11 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
         context.showMessage(message: "Download failed: $e".tl);
       }
     } finally {
-      _isDownloading = false;
       // 模型文件已变更，失效原生会话缓存并刷新服务路径缓存
       await Anime4KV4Service.instance.resetNativeSession();
       await Anime4KV4Service.instance.checkModelAvailable();
       await _refreshModelStatus();
       _refreshAiImages();
-      if (mounted) {
-        setState(() {
-          _status = _isModelDownloaded ? 'Ready' : '';
-        });
-      }
     }
   }
 
@@ -136,10 +134,6 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
     _refreshAiImages();
     if (mounted) {
       context.showMessage(message: "Model deleted".tl);
-      setState(() {
-        _status = '';
-        _downloadProgress = 0.0;
-      });
     }
   }
 
@@ -217,8 +211,8 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
   @override
   Widget build(BuildContext context) {
     final isV4 = _version == 'v4';
-    return SmoothCustomScrollView(
-      slivers: [
+    final slivers = <Widget>[
+      if (!widget.modelsOnly) ...[
         SliverAppbar(title: Text("Anime4K".tl)),
         _SwitchSetting(
           title: "Enable Anime4K Upscaling".tl,
@@ -309,26 +303,28 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
             ),
           ),
         ),
-        // v4 模型（倍数）选择：4x 动画 / 2x 通用
-        if (isV4)
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-              child: Wrap(
-                spacing: 8,
-                children: Anime4KV4ModelManager.getModels().map((m) {
-                  final selected = Anime4KV4ModelManager.selectedDef.id == m.id;
-                  return ChoiceChip(
-                    label: Text(m.displayName.tl),
-                    selected: selected,
-                    onSelected: _busy
-                        ? null
-                        : (_) => _manageModel(() => _selectModel(m.id)),
-                  );
-                }).toList(),
-              ),
+      ],
+      // v4 模型（倍数）选择：4x 动画 / 2x 通用
+      if (isV4 || widget.modelsOnly)
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Wrap(
+              spacing: 8,
+              children: Anime4KV4ModelManager.getModels().map((m) {
+                final selected = Anime4KV4ModelManager.selectedDef.id == m.id;
+                return ChoiceChip(
+                  label: Text(m.displayName.tl),
+                  selected: selected,
+                  onSelected: _busy
+                      ? null
+                      : (_) => _manageModel(() => _selectModel(m.id)),
+                );
+              }).toList(),
             ),
           ),
+        ),
+      if (!widget.modelsOnly) ...[
         // v1 专用参数（Scale/Push/Grad）：仅 v1 显示
         SliverAnimatedVisibility(
           visible: !isV4,
@@ -373,219 +369,211 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
             }
           },
         ).toSliver(),
-        // ---- v4 模型管理（仅 v4 显示） ----
-        if (isV4) ...[
-          SliverToBoxAdapter(
+      ],
+      // ---- v4 模型管理（仅 v4 显示） ----
+      if (isV4 || widget.modelsOnly) ...[
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+            child: Text(
+              "Model Management".tl,
+              style: TextStyle(
+                color: context.colorScheme.primary,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ),
+        SliverToBoxAdapter(
+          child: Card(
+            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-              child: Text(
-                "Model Management".tl,
-                style: TextStyle(
-                  color: context.colorScheme.primary,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ),
-          ),
-          SliverToBoxAdapter(
-            child: Card(
-              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    Anime4KV4ModelManager.selectedDef.displayName.tl,
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    _isModelDownloaded
+                        ? "Model downloaded".tl
+                        : "Model not downloaded (~${Anime4KV4ModelManager.selectedDef.sizeHintMB}MB)"
+                              .tl,
+                    style: TextStyle(
+                      color: context.colorScheme.onSurfaceVariant,
+                      fontSize: 12,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(Anime4KV4ModelManager.selectedDef.protocolNote.tl),
+                  const SizedBox(height: 8),
+                  Text(Anime4KV4ModelManager.selectedDef.licenseNote.tl),
+                  const SizedBox(height: 8),
+                  SelectableText(Anime4KV4ModelManager.selectedDef.sourceUrl),
+                  if (Anime4KV4ModelManager.legacySelectionMigrated)
                     Text(
-                      Anime4KV4ModelManager.selectedDef.displayName.tl,
-                      style: const TextStyle(fontWeight: FontWeight.bold),
+                      'The retired general_x2 selection was migrated to RealESRGAN-x2plus. Download the new weights; old files and custom import records were not reused.'
+                          .tl,
                     ),
-                    const SizedBox(height: 8),
-                    Text(
-                      _isModelDownloaded
-                          ? "Model downloaded".tl
-                          : "Model not downloaded (~${Anime4KV4ModelManager.selectedDef.sizeHintMB}MB)"
-                                .tl,
-                      style: TextStyle(
-                        color: context.colorScheme.onSurfaceVariant,
-                        fontSize: 12,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(Anime4KV4ModelManager.selectedDef.protocolNote.tl),
-                    const SizedBox(height: 8),
-                    Text(Anime4KV4ModelManager.selectedDef.licenseNote.tl),
-                    const SizedBox(height: 8),
-                    SelectableText(Anime4KV4ModelManager.selectedDef.sourceUrl),
-                    if (Anime4KV4ModelManager.legacySelectionMigrated)
-                      Text(
-                        'The retired general_x2 selection was migrated to RealESRGAN-x2plus. Download the new weights; old files and custom import records were not reused.'
-                            .tl,
-                      ),
-                    if (_status.isNotEmpty) ...[
-                      const SizedBox(height: 8),
-                      Text(
-                        _status,
-                        style: TextStyle(
-                          color: context.colorScheme.primary,
-                          fontSize: 12,
-                        ),
-                      ),
-                    ],
-                    if (_isDownloading) ...[
-                      const SizedBox(height: 8),
-                      LinearProgressIndicator(value: _downloadProgress),
-                    ],
-                    const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        if (!_isModelDownloaded)
-                          Expanded(
-                            child: ElevatedButton.icon(
-                              onPressed: _busy
-                                  ? null
-                                  : () => _manageModel(_downloadModel),
-                              icon: _isDownloading
-                                  ? const SizedBox(
-                                      width: 16,
-                                      height: 16,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                      ),
-                                    )
-                                  : const Icon(Icons.download),
-                              label: Text(
-                                _isDownloading
-                                    ? "Downloading...".tl
-                                    : "Download Model".tl,
-                              ),
-                            ),
-                          ),
-                        if (_isModelDownloaded) ...[
-                          Expanded(
-                            child: OutlinedButton.icon(
-                              onPressed: _busy
-                                  ? null
-                                  : () => _manageModel(_deleteModel),
-                              icon: const Icon(Icons.delete_outline),
-                              label: Text("Delete Model".tl),
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-          // 自选本地模型文件
-          SliverToBoxAdapter(
-            child: Card(
-              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      "Custom Model File".tl,
-                      style: const TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      _usingCustom
-                          ? "Using: ${_customModelName ?? 'custom model'}".tl
-                          : "Select a local .onnx model to override the built-in one"
-                                .tl,
-                      style: TextStyle(
-                        color: context.colorScheme.onSurfaceVariant,
-                        fontSize: 12,
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    Row(
-                      children: [
+                  _ModelDownloadProgress(
+                    state: Anime4KV4ModelManager.downloadState.value,
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      if (!_isModelDownloaded)
                         Expanded(
                           child: ElevatedButton.icon(
                             onPressed: _busy
                                 ? null
-                                : () => _manageModel(_pickLocalModel),
-                            icon: const Icon(Icons.folder_open),
-                            label: Text("Select Model File".tl),
-                          ),
-                        ),
-                        if (_customModelName != null) ...[
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: OutlinedButton.icon(
-                              onPressed: _busy
-                                  ? null
-                                  : () => _manageModel(_clearCustomModel),
-                              icon: const Icon(Icons.restore),
-                              label: Text("Use Built-in".tl),
+                                : () => _manageModel(_downloadModel),
+                            icon: _isDownloading
+                                ? const SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(Icons.download),
+                            label: Text(
+                              _isDownloading
+                                  ? "Downloading...".tl
+                                  : "Download Model".tl,
                             ),
                           ),
-                        ],
+                        ),
+                      if (_isModelDownloaded) ...[
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: _busy
+                                ? null
+                                : () => _manageModel(_deleteModel),
+                            icon: const Icon(Icons.delete_outline),
+                            label: Text("Delete Model".tl),
+                          ),
+                        ),
                       ],
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-          // 镜像 URL 管理
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-              child: Text(
-                "Download Mirrors".tl,
-                style: TextStyle(
-                  color: context.colorScheme.primary,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ),
-          ),
-          ..._modelUrls.asMap().entries.map(
-            (e) => _MirrorUrlTile(
-              index: e.key,
-              url: e.value,
-              onDelete: (index) => _manageModel(() => _removeMirrorUrl(index)),
-            ),
-          ),
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: _busy
-                          ? null
-                          : () => _manageModel(_addMirrorUrl),
-                      icon: const Icon(Icons.add),
-                      label: Text("Add Mirror URL".tl),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: _busy
-                          ? null
-                          : () => _manageModel(() async {
-                              await Anime4KV4ModelManager.resetModelUrls();
-                              await _refreshModelStatus();
-                            }),
-                      icon: const Icon(Icons.restart_alt),
-                      label: Text("Reset".tl),
-                    ),
+                    ],
                   ),
                 ],
               ),
             ),
           ),
-        ],
+        ),
+        // 自选本地模型文件
+        SliverToBoxAdapter(
+          child: Card(
+            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    "Custom Model File".tl,
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    _usingCustom
+                        ? "Using: ${_customModelName ?? 'custom model'}".tl
+                        : "Select a local .onnx model to override the built-in one"
+                              .tl,
+                    style: TextStyle(
+                      color: context.colorScheme.onSurfaceVariant,
+                      fontSize: 12,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          onPressed: _busy
+                              ? null
+                              : () => _manageModel(_pickLocalModel),
+                          icon: const Icon(Icons.folder_open),
+                          label: Text("Select Model File".tl),
+                        ),
+                      ),
+                      if (_customModelName != null) ...[
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: _busy
+                                ? null
+                                : () => _manageModel(_clearCustomModel),
+                            icon: const Icon(Icons.restore),
+                            label: Text("Use Built-in".tl),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        // 镜像 URL 管理
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+            child: Text(
+              "Download Mirrors".tl,
+              style: TextStyle(
+                color: context.colorScheme.primary,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ),
+        ..._modelUrls.asMap().entries.map(
+          (e) => _MirrorUrlTile(
+            index: e.key,
+            url: e.value,
+            onDelete: _busy
+                ? null
+                : (index) => _manageModel(() => _removeMirrorUrl(index)),
+          ),
+        ),
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _busy ? null : () => _manageModel(_addMirrorUrl),
+                    icon: const Icon(Icons.add),
+                    label: Text("Add Mirror URL".tl),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _busy
+                        ? null
+                        : () => _manageModel(() async {
+                            await Anime4KV4ModelManager.resetModelUrls();
+                            await _refreshModelStatus();
+                          }),
+                    icon: const Icon(Icons.restart_alt),
+                    label: Text("Reset".tl),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ],
-    );
+    ];
+    return widget.modelsOnly
+        ? SliverMainAxisGroup(slivers: slivers)
+        : SmoothCustomScrollView(slivers: slivers);
   }
 }

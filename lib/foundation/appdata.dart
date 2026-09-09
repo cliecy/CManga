@@ -143,8 +143,6 @@ class Appdata with Init {
       searchHistory = List.from(json['searchHistory']);
     } catch (e) {
       Log.error("Appdata", "Failed to load appdata", e);
-      Log.info("Appdata", "Resetting appdata");
-      file.deleteIgnoreError();
     }
     try {
       var implicitDataFile = File(FilePath.join(dataPath, 'implicitData.json'));
@@ -164,6 +162,22 @@ final appdata = Appdata._create();
 
 class Settings with ChangeNotifier {
   Settings._create();
+
+  static const _integerSettings = {
+    'preloadImageCount',
+    'downloadThreads',
+    'autoPageTurningInterval',
+    'readerScreenPicNumberForLandscape',
+    'readerScreenPicNumberForPortrait',
+  };
+
+  static dynamic _normalizeNumericSetting(String key, dynamic value) {
+    // Older sliders saved these integer settings as JSON doubles.
+    if (_integerSettings.contains(key) && value is double) {
+      return value.round();
+    }
+    return value;
+  }
 
   final _data = <String, dynamic>{
     'comicDisplayMode': 'detailed', // detailed, brief
@@ -249,7 +263,14 @@ class Settings with ChangeNotifier {
   }
 
   operator []=(String key, dynamic value) {
-    _data[key] = value;
+    if (key == 'comicSpecificSettings') {
+      for (final readerSettings in (value as Map<String, dynamic>).values) {
+        (readerSettings as Map<String, dynamic>).updateAll(
+          _normalizeNumericSetting,
+        );
+      }
+    }
+    _data[key] = _normalizeNumericSetting(key, value);
     if (key != "dataVersion") {
       notifyListeners();
     }
@@ -288,7 +309,10 @@ class Settings with ChangeNotifier {
     (_data['comicSpecificSettings'] as Map<String, dynamic>).putIfAbsent(
       "$comicId@$sourceKey",
       () => <String, dynamic>{},
-    )[key] = value;
+    )[key] = _normalizeNumericSetting(
+      key,
+      value,
+    );
     notifyListeners();
   }
 

@@ -1,8 +1,9 @@
-import 'dart:async' show Future, StreamController, scheduleMicrotask;
+import 'dart:async' show Future, StreamController, scheduleMicrotask, unawaited;
 import 'dart:convert';
 import 'dart:math';
 import 'dart:ui' as ui show Codec;
 import 'dart:ui';
+import 'package:async/async.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:venera/foundation/cache_manager.dart';
@@ -28,8 +29,10 @@ abstract class BaseImageProvider<T extends BaseImageProvider<T>>
             screen.size.height * _normalComicImageRatio,
           );
         } else {
-          _effectiveScreenWidth =
-              max(_effectiveScreenWidth ?? 0, screen.size.width);
+          _effectiveScreenWidth = max(
+            _effectiveScreenWidth ?? 0,
+            screen.size.width,
+          );
         }
       }
       if (_effectiveScreenWidth! < _minComicImageWidth) {
@@ -46,8 +49,27 @@ abstract class BaseImageProvider<T extends BaseImageProvider<T>>
   @override
   ImageStreamCompleter loadImage(T key, ImageDecoderCallback decode) {
     final chunkEvents = StreamController<ImageChunkEvent>();
+    final loading = CancelableCompleter<ui.Codec>();
+    chunkEvents.onCancel = () {
+      // Stream completion is not cancellation; only an abandoned consumer stops work.
+      if (!chunkEvents.isClosed) unawaited(loading.operation.cancel());
+    };
+    unawaited(
+      _loadBufferAsync(
+        key,
+        chunkEvents,
+        decode,
+        () => loading.isCanceled,
+      ).then<void>((codec) {
+        if (loading.isCanceled) {
+          codec.dispose();
+        } else {
+          loading.complete(codec);
+        }
+      }, onError: loading.completeError),
+    );
     return MultiFrameImageStreamCompleter(
-      codec: _loadBufferAsync(key, chunkEvents, decode),
+      codec: loading.operation.value,
       chunkEvents: chunkEvents.stream,
       scale: 1.0,
       informationCollector: () sync* {
@@ -64,22 +86,17 @@ abstract class BaseImageProvider<T extends BaseImageProvider<T>>
     T key,
     StreamController<ImageChunkEvent> chunkEvents,
     ImageDecoderCallback decode,
+    bool Function() shouldStop,
   ) async {
     try {
       int retryTime = 1;
 
-      bool stop = false;
-
-      chunkEvents.onCancel = () {
-        stop = true;
-      };
-
       Uint8List? data;
 
-      while (data == null && !stop) {
+      while (data == null && !shouldStop()) {
         try {
           data = await load(chunkEvents, () {
-            if (stop) {
+            if (shouldStop()) {
               throw const _ImageLoadingStopException();
             }
           });
@@ -98,14 +115,14 @@ abstract class BaseImageProvider<T extends BaseImageProvider<T>>
             }
           }
           retryTime <<= 1;
-          if (retryTime > (1 << 3) || stop) {
+          if (retryTime > (1 << 3) || shouldStop()) {
             rethrow;
           }
           await Future.delayed(Duration(seconds: retryTime));
         }
       }
 
-      if (stop) {
+      if (shouldStop()) {
         throw const _ImageLoadingStopException();
       }
 
@@ -124,8 +141,9 @@ abstract class BaseImageProvider<T extends BaseImageProvider<T>>
         if (data.length < 2 * 1024) {
           // data is too short, it's likely that the data is text, not image
           try {
-            var text =
-                const Utf8Codec(allowMalformed: false).decoder.convert(data);
+            var text = const Utf8Codec(
+              allowMalformed: false,
+            ).decoder.convert(data);
             throw Exception("Expected image data, but got text: $text");
           } catch (e) {
             // ignore

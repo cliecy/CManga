@@ -1,9 +1,13 @@
 part of 'settings_page.dart';
 
+/// Changes to global AI settings and installed models also invalidate open readers.
+final ValueNotifier<int> imageAiSettingsRevision = ValueNotifier(0);
+
 void _refreshAiImages() {
   PaintingBinding.instance.imageCache.clear();
   PaintingBinding.instance.imageCache.clearLiveImages();
   ComicImage.clear();
+  imageAiSettingsRevision.value++;
 }
 
 Future<bool> _allowImageAi(BuildContext context) async {
@@ -14,6 +18,96 @@ Future<bool> _allowImageAi(BuildContext context) async {
     );
   }
   return supported;
+}
+
+/// Persistent download activity, independent of any settings page's lifetime.
+class ModelDownloadStatusView extends StatelessWidget {
+  const ModelDownloadStatusView({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: Listenable.merge([
+        Anime4KV4ModelManager.downloadState,
+        ColorizationModelManager.downloadState,
+      ]),
+      builder: (context, _) {
+        final states =
+            [
+              Anime4KV4ModelManager.downloadState.value,
+              ColorizationModelManager.downloadState.value,
+            ].whereType<ModelDownloadState>().where(
+              (state) => state.isDownloading || state.error != null,
+            );
+        if (states.isEmpty) return const SizedBox.shrink();
+        return Card(
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (final state in states)
+                  _ModelDownloadProgress(state: state),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _ModelDownloadProgress extends StatelessWidget {
+  const _ModelDownloadProgress({required this.state});
+
+  final ModelDownloadState? state;
+
+  @override
+  Widget build(BuildContext context) {
+    final state = this.state;
+    if (state == null || (!state.isDownloading && state.error == null)) {
+      return const SizedBox.shrink();
+    }
+    final progress = state.progress;
+    final bytes = state.totalBytes > 0
+        ? '${state.receivedBytes} / ${state.totalBytes}'
+        : '${state.receivedBytes}';
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            state.modelName.tl,
+            style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
+          Text(
+            state.error == null
+                ? state.message.tl
+                : 'Download failed: @e'.tlParams({'e': state.error!}),
+            style: TextStyle(
+              color: state.error == null
+                  ? context.colorScheme.onSurfaceVariant
+                  : context.colorScheme.error,
+            ),
+          ),
+          Text(
+            '@bytes bytes'.tlParams({'bytes': bytes}) +
+                (progress == null
+                    ? ''
+                    : ' · ${(progress * 100).toStringAsFixed(1)}%'),
+          ),
+          if (state.isDownloading) ...[
+            const SizedBox(height: 4),
+            LinearProgressIndicator(value: progress),
+            Text('Downloads continue after closing settings.'.tl),
+          ],
+        ],
+      ),
+    );
+  }
 }
 
 class _ImageAiControls extends StatefulWidget {
@@ -108,7 +202,7 @@ class _ImageAiControlsState extends State<_ImageAiControls> {
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
-      listenable: appdata.settings,
+      listenable: Listenable.merge([appdata.settings, imageAiSettingsRevision]),
       builder: (context, _) => ValueListenableBuilder<ImageAiStatus>(
         valueListenable: ImageAiService.instance.status,
         builder: (context, status, _) {

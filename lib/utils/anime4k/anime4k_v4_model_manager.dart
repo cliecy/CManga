@@ -1,12 +1,13 @@
 import 'dart:io';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/utils/image_ai_service.dart';
+import 'package:venera/utils/model_download.dart';
 
 /// 单个 v4 超分模型的定义。
 ///
@@ -127,9 +128,9 @@ class Anime4KV4ModelManager {
   static String _selectedModelId = 'anime4k_acnet';
   static bool legacySelectionMigrated = false;
 
-  static bool _isDownloading = false;
-  static double _downloadProgress = 0.0;
-  static String? _currentStatus;
+  static final ValueNotifier<ModelDownloadState?> downloadState =
+      ValueNotifier<ModelDownloadState?>(null);
+  static Future<void>? _downloadTask;
 
   static V4ModelDef _modelById(String id) =>
       models.firstWhere((m) => m.id == id, orElse: () => models.first);
@@ -158,17 +159,8 @@ class Anime4KV4ModelManager {
     id = migrateModelId(id);
     if (!isValidModelId(id)) return;
     _selectedModelId = id;
-    _resetMemState();
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_selectedModelKey, id);
-  }
-
-  static void _resetMemState() {
-    // All model-scoped preferences are read by definition, not a global cache.
-    if (!_isDownloading) {
-      _downloadProgress = 0.0;
-      _currentStatus = null;
-    }
   }
 
   /// Read mirror preferences for the captured model, including an empty list.
@@ -351,85 +343,115 @@ class Anime4KV4ModelManager {
     return await targetFile.length();
   }
 
-  static double get downloadProgress => _downloadProgress;
-  static bool get isDownloading => _isDownloading;
-  static String? get currentStatus => _currentStatus;
+  static double get downloadProgress => downloadState.value?.progress ?? 0;
+  static bool get isDownloading => _downloadTask != null;
+  static String? get currentStatus => downloadState.value?.message;
 
-  /// 手动触发模型下载，支持进度回调和断点续传。
+  /// Downloads independently of observers; concurrent callers share one task.
   static Future<void> downloadModel({
     void Function(double progress)? onProgress,
     void Function(String status)? onStatus,
-  }) async {
-    if (_isDownloading) {
-      throw Exception('Model is already downloading');
-    }
-
+  }) {
+    final existing = _downloadTask;
     final def = selectedDef;
-    final dir = await getApplicationSupportDirectory();
-    final targetPath = path.join(dir.path, def.fileName);
-    final tempPath = '$targetPath.tmp';
-    final tempFile = File(tempPath);
+    final task =
+        existing ??
+        (_downloadTask = Future<void>.microtask(() => _downloadModel(def)));
+    return forwardModelDownloadCallbacks(
+      task,
+      downloadState,
+      onProgress: onProgress,
+      onStatus: onStatus,
+      replay: existing != null,
+    );
+  }
 
-    _isDownloading = true;
-    _downloadProgress = 0.0;
-
-    void reportStatus(String status) {
-      _currentStatus = status;
-      onStatus?.call(status);
+  static Future<void> _downloadModel(V4ModelDef def) async {
+    var receivedBytes = 0;
+    var totalBytes = 0;
+    var message = 'Preparing download...';
+    void report({String? status, bool active = true, String? error}) {
+      if (status != null) message = status;
+      downloadState.value = ModelDownloadState(
+        modelId: def.id,
+        modelName: def.displayName,
+        message: message,
+        receivedBytes: receivedBytes,
+        totalBytes: totalBytes,
+        isDownloading: active,
+        error: error,
+      );
     }
 
     try {
+      report();
+      final dir = await getApplicationSupportDirectory();
+      final targetPath = path.join(dir.path, def.fileName);
+      final tempPath = '$targetPath.tmp';
+      final tempFile = File(tempPath);
       if (await tempFile.exists()) {
         await tempFile.delete();
       }
 
-      Exception? lastError;
+      Object? lastError;
+      StackTrace? lastStack;
       final urls = await getModelUrls(model: def);
       for (int i = 0; i < urls.length; i++) {
-        final url = urls[i];
-        reportStatus('Trying mirror ${i + 1}/${urls.length}...');
+        receivedBytes = 0;
+        totalBytes = 0;
+        report(status: 'Downloading from mirror ${i + 1}/${urls.length}...');
         try {
-          await _downloadWithResume(url, tempPath, (received, total) {
-            _downloadProgress = total > 0 ? received / total : 0;
-            onProgress?.call(_downloadProgress);
+          await _downloadWithResume(urls[i], tempPath, (received, total) {
+            receivedBytes = received;
+            totalBytes = total;
+            report();
           });
-          final downloaded = await File(tempPath).length();
-          if (downloaded > 0) {
-            if (def.sha256Digest != null) {
-              reportStatus('Verifying SHA-256...');
-              final digest = await ImageAiService.instance.modelIdentity(
-                tempFile.path,
-              );
-              if (digest != def.sha256Digest) {
-                throw StateError('Model SHA-256 mismatch');
-              }
-            }
-            await ImageAiService.instance.installStagedModel(
-              tempPath,
-              targetPath,
-              'esrgan',
-            );
-            final oldBackup = File('$targetPath.bak');
-            if (await oldBackup.exists()) await oldBackup.delete();
-            final prefs = await SharedPreferences.getInstance();
-            await prefs.setBool('anime4kV4_custom_${def.id}', false);
-            await prefs.remove('anime4kV4_custom_name_${def.id}');
-            _downloadProgress = 1.0;
-            reportStatus('Download complete');
-            return;
+          final downloaded = await tempFile.length();
+          if (downloaded == 0) {
+            throw StateError('Empty model download');
           }
-          await File(tempPath).delete();
-        } catch (e) {
-          lastError = e is Exception ? e : Exception(e.toString());
-          reportStatus('Mirror ${i + 1} failed: $e');
+          if (def.sha256Digest != null) {
+            report(status: 'Verifying SHA-256...');
+            final digest = await ImageAiService.instance.modelIdentity(
+              tempFile.path,
+            );
+            if (digest != def.sha256Digest) {
+              throw StateError('Model SHA-256 mismatch');
+            }
+          }
+          report(status: 'Validating and installing model...');
+          await ImageAiService.instance.installStagedModel(
+            tempPath,
+            targetPath,
+            'esrgan',
+          );
+          final oldBackup = File('$targetPath.bak');
+          if (await oldBackup.exists()) await oldBackup.delete();
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setBool('anime4kV4_custom_${def.id}', false);
+          await prefs.remove('anime4kV4_custom_name_${def.id}');
+          receivedBytes = downloaded;
+          totalBytes = downloaded;
+          report(status: 'Download complete', active: false);
+          return;
+        } catch (error, stack) {
+          lastError = error;
+          lastStack = stack;
+          report(status: 'Mirror ${i + 1} failed: $error');
           if (await tempFile.exists()) {
             await tempFile.delete();
           }
         }
       }
-      throw lastError ?? Exception('All model download URLs failed');
+      if (lastError != null) {
+        Error.throwWithStackTrace(lastError, lastStack!);
+      }
+      throw StateError('All model download URLs failed');
+    } catch (error) {
+      report(status: 'Download failed: $error', active: false, error: '$error');
+      rethrow;
     } finally {
-      _isDownloading = false;
+      _downloadTask = null;
     }
   }
 

@@ -209,6 +209,13 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
           right: 0,
           child: buildBottom(),
         ),
+        Positioned(
+          left: 16,
+          right: 16,
+          bottom:
+              context.padding.bottom + (_isOpen ? kBottomBarHeight + 8 : 32),
+          child: const ModelDownloadStatusView(),
+        ),
       ],
     );
   }

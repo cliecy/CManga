@@ -1,9 +1,11 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:venera/utils/image_ai_service.dart';
+import 'package:venera/utils/model_download.dart';
 
 /// A model's explicit native pipeline, installation and publishing provenance.
 class ColorizationModelVariant {
@@ -43,9 +45,9 @@ class ColorizationModelManager {
   static const _migrationKey = 'colorization_independent_models_v1';
   static Future<void>? _initialization;
   static String _selectedVariant = 'deoldify';
-  static bool _isDownloading = false;
-  static double _downloadProgress = 0.0;
-  static String? _currentStatus;
+  static final ValueNotifier<ModelDownloadState?> downloadState =
+      ValueNotifier<ModelDownloadState?>(null);
+  static Future<void>? _downloadTask;
 
   static const List<ColorizationModelVariant> modelVariants = [
     ColorizationModelVariant(
@@ -118,7 +120,7 @@ class ColorizationModelManager {
     ),
     ColorizationModelVariant(
       id: 'manga_light',
-      label: 'Manga Light — generator only (~191 MB)',
+      label: 'Manga Light Colorizer V6 — generator only (~191 MB)',
       type: 'manga_light',
       fileName: 'manga_light.onnx',
       sizeBytes: 191335312,
@@ -326,56 +328,100 @@ class ColorizationModelManager {
     return targetPath == null ? 0 : File(targetPath).length();
   }
 
-  static double get downloadProgress => _downloadProgress;
-  static bool get isDownloading => _isDownloading;
-  static String? get currentStatus => _currentStatus;
+  static double get downloadProgress => downloadState.value?.progress ?? 0;
+  static bool get isDownloading => _downloadTask != null;
+  static String? get currentStatus => downloadState.value?.message;
 
+  /// Concurrent callers observe the running model, not a second transfer.
   static Future<void> downloadModel({
     String? variant,
     bool nonCommercialAccepted = false,
     void Function(double progress)? onProgress,
     void Function(String status)? onStatus,
-  }) async {
-    if (_isDownloading) throw StateError('Model is already downloading');
-    final def = variant == null
-        ? await getSelectedDefinition()
-        : _definition(variant);
-    if (!def.canDownload) {
-      throw StateError(
-        'This model supports local import only: upstream license unresolved',
+  }) {
+    final existing = _downloadTask;
+    final Future<void> task;
+    if (existing != null) {
+      task = existing;
+    } else {
+      final requestedId = variant ?? _selectedVariant;
+      final Future<ColorizationModelVariant> Function() definition =
+          variant == null
+          ? getSelectedDefinition
+          : () async => _definition(variant);
+      task = _downloadTask = Future<void>.microtask(
+        () => _downloadModel(definition, requestedId, nonCommercialAccepted),
       );
     }
-    if (def.requiresNonCommercialConsent && !nonCommercialAccepted) {
-      throw StateError(
-        'CC BY-NC-SA 4.0 non-commercial license acceptance required',
+    return forwardModelDownloadCallbacks(
+      task,
+      downloadState,
+      onProgress: onProgress,
+      onStatus: onStatus,
+      replay: existing != null,
+    );
+  }
+
+  static Future<void> _downloadModel(
+    Future<ColorizationModelVariant> Function() definition,
+    String requestedId,
+    bool nonCommercialAccepted,
+  ) async {
+    ColorizationModelVariant? capturedDef;
+    var receivedBytes = 0;
+    var totalBytes = 0;
+    var message = 'Preparing download...';
+    void report({String? status, bool active = true, String? error}) {
+      if (status != null) message = status;
+      downloadState.value = ModelDownloadState(
+        modelId: capturedDef?.id ?? requestedId,
+        modelName: capturedDef?.label ?? requestedId,
+        message: message,
+        receivedBytes: receivedBytes,
+        totalBytes: totalBytes,
+        isDownloading: active,
+        error: error,
       );
-    }
-    _isDownloading = true;
-    _downloadProgress = 0;
-    void reportStatus(String status) {
-      _currentStatus = status;
-      onStatus?.call(status);
     }
 
     try {
+      report();
+      final def = await definition();
+      capturedDef = def;
+      report();
+      if (!def.canDownload) {
+        throw StateError(
+          'This model supports local import only: upstream license unresolved',
+        );
+      }
+      if (def.requiresNonCommercialConsent && !nonCommercialAccepted) {
+        throw StateError(
+          'CC BY-NC-SA 4.0 non-commercial license acceptance required',
+        );
+      }
       final dir = await getApplicationSupportDirectory();
       final targetPath = path.join(dir.path, def.fileName);
       final tempFile = File('$targetPath.tmp');
       if (await tempFile.exists()) await tempFile.delete();
-      Exception? lastError;
+      Object? lastError;
+      StackTrace? lastStack;
       final urls = await getModelUrls(model: def);
       for (var i = 0; i < urls.length; i++) {
-        reportStatus('Trying mirror ${i + 1}/${urls.length}...');
+        receivedBytes = 0;
+        totalBytes = 0;
+        report(status: 'Downloading from mirror ${i + 1}/${urls.length}...');
         try {
           await _downloadWithResume(urls[i], tempFile.path, (received, total) {
-            _downloadProgress = total > 0 ? received / total : 0;
-            onProgress?.call(_downloadProgress);
+            receivedBytes = received;
+            totalBytes = total;
+            report();
           });
-          if (await tempFile.length() == 0) {
+          final downloaded = await tempFile.length();
+          if (downloaded == 0) {
             throw StateError('Empty model download');
           }
           if (def.sha256Digest != null) {
-            reportStatus('Verifying SHA-256...');
+            report(status: 'Verifying SHA-256...');
             final digest = await ImageAiService.instance.modelIdentity(
               tempFile.path,
             );
@@ -383,6 +429,7 @@ class ColorizationModelManager {
               throw StateError('Model SHA-256 mismatch');
             }
           }
+          report(status: 'Validating and installing model...');
           await ImageAiService.instance.installStagedModel(
             tempFile.path,
             targetPath,
@@ -391,18 +438,26 @@ class ColorizationModelManager {
           final oldBackup = File('$targetPath.bak');
           if (await oldBackup.exists()) await oldBackup.delete();
           await _clearCustomRecord(def);
-          _downloadProgress = 1;
-          reportStatus('Download complete');
+          receivedBytes = downloaded;
+          totalBytes = downloaded;
+          report(status: 'Download complete', active: false);
           return;
-        } catch (e) {
-          lastError = e is Exception ? e : Exception(e.toString());
-          reportStatus('Mirror ${i + 1} failed: $e');
+        } catch (error, stack) {
+          lastError = error;
+          lastStack = stack;
+          report(status: 'Mirror ${i + 1} failed: $error');
           if (await tempFile.exists()) await tempFile.delete();
         }
       }
-      throw lastError ?? StateError('All model download URLs failed');
+      if (lastError != null) {
+        Error.throwWithStackTrace(lastError, lastStack!);
+      }
+      throw StateError('All model download URLs failed');
+    } catch (error) {
+      report(status: 'Download failed: $error', active: false, error: '$error');
+      rethrow;
     } finally {
-      _isDownloading = false;
+      _downloadTask = null;
     }
   }
 

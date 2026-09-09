@@ -36,6 +36,9 @@ Cartoon embedded text translation function**
 - 在“设置 → 上色”先选择模型，再下载或导入该模型契约兼容的 ONNX；各模型独立安装、替换、恢复和删除，不是任意 ONNX 自动识别器。**颜色浓度**独立控制 0–120%，步进 1%；100% 为模型预测色度，120% 额外增艳。0% 生成中性色度，不保证逐字节还原原图；关闭功能才完全跳过上色。
 - Windows 的 **Auto** 优先尝试 DirectML，模型或设备不兼容时明确报告同一模型的 CPU 回退；也可指定 CPU。Android 上色沿用 CPU 策略。后端可用不等于每个模型、每个算子均在 GPU 运行，不保证所有显卡加速。
 - 两项功能同时开启时顺序为“超分 → 上色”。全局和漫画专属设置遵循现有优先级；调参后刷新当前图片。基础推理结果有界缓存，缓存仍在时，纯倍率/强度/对比度调整不重复执行对应模型；上游像素变化会正确重算下游上色。
+- **完整 AI 预加载**按当前阅读模式和预加载数量维护滚动窗口：后台页也会走完“超分 → 上色”，不再只下载原图。单个后台任务逐页处理，翻页复用已完成的阶段缓存；换模型或参数后重新处理受影响页面。缓存有容量限制，尚未完成或已被淘汰的页面仍需等待，不承诺所有页面即时显示或多模型同时占满 GPU。
+- 阅读侧栏可直接展开**超分模型（AI v4）/ 上色模型**，选择、下载或导入模型，无需离开漫画。模型选择为全局设置，即使启用了漫画独立参数也对所有漫画生效；选择超分模型不会自动打开超分或把 v1 改成 v4。
+- **模型下载进度跨页面持续显示**：关闭设置后阅读器仍显示模型、实际字节数和百分比，重新打开设置继续观察同一任务；总大小未知时显示不定进度。下载、SHA 校验和原生安装分别报告，失败保留原因且不破坏原有可用模型。此保证针对应用运行期间切换页面，不代表退出程序后继续下载或自动断点恢复。
 - AI 只在 Windows、Android 接入。失败时保留可阅读图片并提示原因，不显示虚假的 AI 成功。原生处理设有内存与像素上限；Windows 单阶段输入及模型原生输出上限为 24×1024×1024 像素，超限会报错而非擅自降低倍率。
 - Windows 发布包按构建规则携带所需 AI 运行库，不需要 Python、CUDA 或手工安装 ONNX Runtime。上色模型不随包分发，首次下载/导入后可离线使用；干净 Windows 虚拟机安装/启动仍未验证。
 
@@ -46,7 +49,7 @@ Cartoon embedded text translation function**
 | DeOldify Artistic / int8 | 标准版约 243 MiB；int8 为实验性轻量变体，仍需兼容 RGB 包装 | 保留现有 DeOldify 管线；[标准 ONNX](https://github.com/instant-high/deoldify-onnx)、[int8 发布](https://github.com/Kiastr/AiColorize/releases/tag/models)。再分发前核对发布者及上游许可。 |
 | AnimeColorDeOldify (`anime_deoldify`) | 约 423 MB；固定 256×256、float32 RGB 0–255 | 来自 [Dakini Grayscale2Color](https://github.com/Dakini/AnimeColorDeOldify) 的原始权重转换，[项目 ONNX 发布及转换来源说明](https://github.com/cliecy/Venera-SSR/releases/tag/image-ai-models-20260909)。Dakini 声明其训练权重为 MIT；应用保留原图 Lab 亮度、透明度与尺寸，不是上游 YUV 滤镜的逐像素复刻。 |
 | DDColor Artistic (`ddcolor`) | 约 980 MB；256×256 中性 Lab 转 RGB 输入，输出两通道 Lab ab | [FaceFusion ONNX](https://huggingface.co/facefusion/models-3.0.0)；[DDColor 上游](https://github.com/piddnad/DDColor) 为 Apache-2.0，FaceFusion 聚合仓库未单独声明该导出许可。支持这一明确契约，不代表任意 DDColor 导出均兼容。 |
-| Manga Light (`manga_light`) | 约 191 MB；512×512 灰度，generator-only | [sharky172 发布](https://huggingface.co/sharky172/manga-light-colorizer)，CC BY-NC-SA 4.0：署名、仅非商业、衍生作品同许可；下载前须确认，导入也须遵守许可。仅运行生成器，SAM 特征和 WD14 嵌入填零，**不运行分割或标签语义引导**，不等同完整上游管线。 |
+| Manga Light Colorizer V6 (`manga_light`) | 约 191 MB；512×512 灰度，`v6_generator.onnx`，generator-only | [sharky172 固定版本](https://huggingface.co/sharky172/manga-light-colorizer/tree/2fb022c4ce55632b7671a1df306f63984928e36a)，CC BY-NC-SA 4.0：署名、仅非商业、衍生作品同许可；下载前须确认，导入也须遵守许可。原有 Manga Light 选项已经使用此 V6 权重，本次明确版本名称，不重复下载同一模型。SAM 特征和 WD14 嵌入填零，**不运行分割或标签语义引导**，不等同完整上游管线。 |
 | Manga Colorization v2 (`manga_v2`) | 约 61 MB；五通道输入，提示/掩码置零，长边适配 512 并补齐至 32 的倍数 | **仅本地导入，无内置下载**。[Faridzar ONNX](https://huggingface.co/Faridzar/manga-colorization-v2-onnx) 标注 MIT，但 [qweasdd 上游权重](https://github.com/qweasdd/manga-colorization-v2) 许可未核实，商业使用及再分发未获澄清。 |
 
 文件体积不是运行内存需求：模型会话、激活、原生倍率输出和图像缓存还会占用 RAM/显存，DDColor 尤其重；4× 超分原生输出有 16 倍像素，即使最终选较小倍率，也不能据此假定推理内存同步降低。超限会明确失败，建议低内存设备先用 ACNet 或较轻模型。Pix2Pix 缺少已核实的官方训练权重，未实现为可用模型选项。

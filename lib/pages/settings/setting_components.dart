@@ -411,14 +411,18 @@ class _SliderSettingState extends State<_SliderSetting> {
           .toDouble();
 
   void _commit(double value) {
+    num storedValue = value;
+    if (widget.interval == 1) {
+      storedValue = value.round();
+    }
     if (widget.comicId == null) {
-      appdata.settings[widget.settingsIndex] = value;
+      appdata.settings[widget.settingsIndex] = storedValue;
     } else {
       appdata.settings.setReaderSetting(
         widget.comicId!,
         widget.comicSource!,
         widget.settingsIndex,
-        value,
+        storedValue,
       );
     }
     appdata.saveData();

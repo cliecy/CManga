@@ -17,6 +17,9 @@ class ReaderSettings extends StatefulWidget {
 }
 
 class _ReaderSettingsState extends State<ReaderSettings> {
+  bool _showSuperResolutionModels = false;
+  bool _showColorizationModels = false;
+
   bool _isChapterCommentsAtEndSupported() {
     String? readerMode;
     bool? showChapterComments;
@@ -174,7 +177,16 @@ class _ReaderSettingsState extends State<ReaderSettings> {
                 : appdata.settings['anime4KVersion'];
             if (version != 'v4') return true;
             if (!await _allowImageAi(context)) return false;
-            return Anime4KV4Service.instance.checkModelAvailable();
+            final ready = await Anime4KV4Service.instance.checkModelAvailable();
+            if (!ready && mounted) {
+              setState(() => _showSuperResolutionModels = true);
+              context.showMessage(
+                message:
+                    'Select or download a compatible model below, then enable AI.'
+                        .tl,
+              );
+            }
+            return ready;
           },
           onChanged: () {
             _refreshAiImages();
@@ -204,6 +216,20 @@ class _ReaderSettingsState extends State<ReaderSettings> {
           comicSource: isEnabledSpecificSettings ? widget.comicSource : null,
           onChanged: widget.onChanged,
         ).toSliver(),
+        ListTile(
+          title: Text('Super-resolution models (AI v4)'.tl),
+          subtitle: Text(
+            'Select or download here. Models are global; v1 needs no model. This does not enable AI or change the engine.'
+                .tl,
+          ),
+          trailing: Icon(
+            _showSuperResolutionModels ? Icons.expand_less : Icons.expand_more,
+          ),
+          onTap: () => setState(
+            () => _showSuperResolutionModels = !_showSuperResolutionModels,
+          ),
+        ).toSliver(),
+        if (_showSuperResolutionModels) const Anime4KSettings(modelsOnly: true),
         _SwitchSetting(
           title: "Enable Colorization(AI上色)".tl,
           titleStyle: TextStyle(
@@ -223,30 +249,11 @@ class _ReaderSettingsState extends State<ReaderSettings> {
               return ColorizationService.instance.checkModelAvailable();
             }
             if (!mounted) return false;
-            showDialog(
-              context: context,
-              builder: (dialogContext) {
-                return ContentDialog(
-                  title: "Model Not Downloaded".tl,
-                  content: Text(
-                    "The colorization model is not downloaded. Please download it in Colorization Settings to enable AI colorization."
-                        .tl,
-                  ).paddingHorizontal(16).fixWidth(double.infinity),
-                  actions: [
-                    Button.filled(
-                      onPressed: () {
-                        dialogContext.pop();
-                        context.to(() => const ColorizationSettings());
-                      },
-                      child: Text("Go to Settings".tl),
-                    ),
-                    Button.outlined(
-                      onPressed: dialogContext.pop,
-                      child: Text("Cancel".tl),
-                    ),
-                  ],
-                );
-              },
+            setState(() => _showColorizationModels = true);
+            context.showMessage(
+              message:
+                  'Select or download a compatible model below, then enable AI.'
+                      .tl,
             );
             return false;
           },
@@ -260,11 +267,21 @@ class _ReaderSettingsState extends State<ReaderSettings> {
           onChanged: widget.onChanged,
         ).toSliver(),
         ListTile(
-          title: Text("Colorization Settings".tl),
-          subtitle: Text("Manage model and intensity".tl),
-          trailing: const Icon(Icons.arrow_forward_ios, size: 16),
-          onTap: () => context.to(() => const ColorizationSettings()),
+          title: Text('Colorization models'.tl),
+          subtitle: Text(
+            'Select or download here. Model selection applies to all comics, even with comic-specific settings.'
+                .tl,
+          ),
+          trailing: Icon(
+            _showColorizationModels ? Icons.expand_less : Icons.expand_more,
+          ),
+          onTap: () => setState(
+            () => _showColorizationModels = !_showColorizationModels,
+          ),
         ).toSliver(),
+        if (_showColorizationModels)
+          const ColorizationSettings(modelsOnly: true),
+        const ModelDownloadStatusView().toSliver(),
         SelectSetting(
           title: "Reading mode".tl,
           settingKey: "readerMode",
