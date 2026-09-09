@@ -33,6 +33,18 @@ target_compile_definitions(${BINARY_NAME} PRIVATE "NOMINMAX")
 # Add dependency libraries and include directories. Add any application-specific
 # dependencies here.
 target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app)
+
+# The channel worker catches engine errors. Keep exceptions local to this
+# library rather than changing runner/plugin standard settings.
+add_library(venera_image_ai_bridge STATIC "image_ai/bridge.cpp")
+target_compile_features(venera_image_ai_bridge PRIVATE cxx_std_17)
+target_compile_options(venera_image_ai_bridge PRIVATE /EHsc /W4 /utf-8)
+target_compile_definitions(venera_image_ai_bridge PRIVATE _HAS_EXCEPTIONS=1
+  NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+target_link_libraries(venera_image_ai_bridge PRIVATE venera_image_ai
+  flutter flutter_wrapper_app)
+target_link_libraries(${BINARY_NAME} PRIVATE venera_image_ai_bridge)
+venera_ai_stage_runtime(${BINARY_NAME})
 target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 

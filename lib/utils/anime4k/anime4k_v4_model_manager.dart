@@ -1,12 +1,13 @@
 import 'dart:io';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:venera/foundation/log.dart';
-import 'package:venera/utils/colorization/colorization_service.dart';
+import 'package:venera/utils/image_ai_service.dart';
+import 'package:venera/utils/model_download.dart';
 
 /// 单个 v4 超分模型的定义。
 ///
@@ -20,6 +21,10 @@ class V4ModelDef {
   final int sizeHintMB;
   final String? bundledAssetPath;
   final List<String> defaultUrls;
+  final String? sha256Digest;
+  final String sourceUrl;
+  final String licenseNote;
+  final String protocolNote;
 
   const V4ModelDef({
     required this.id,
@@ -29,25 +34,24 @@ class V4ModelDef {
     required this.sizeHintMB,
     this.bundledAssetPath,
     required this.defaultUrls,
+    this.sha256Digest,
+    required this.sourceUrl,
+    required this.licenseNote,
+    required this.protocolNote,
   });
 }
 
-/// v4 超分模型管理器：管理 Anime4K v4 超分 ONNX 模型（默认官方 ACNet 2×，可选 Real-ESRGAN
-/// 4× / 通用 2×）的生命周期。支持多模型，所有对外方法按“当前选中模型”路由，调用方无需传 modelId。
+/// v4 super-resolution lifecycle: ACNet and independently installed Real-ESRGAN
+/// models. Captured definitions keep installs isolated from selection changes.
 ///
 /// 模型获取策略（三选一，优先级从高到低）：
 ///  1. 自选外部模型（用户从本地导入，最高优先，绝不被覆盖）；
-///  2. 打包进 APK 的内置模型（[extractBundledModelIfNeeded] 抽取到应用目录，开箱即用；
-///     ACNet 官方 onnx 仅 ~21KB 故打包，Real-ESRGAN 较大仍走下载，保持 APK 精简）；
+///  2. Bundled ACNet, extracted to application support on supported native platforms;
 ///  3. 运行时下载（下载管理器保留：用户删除模型后可重新下载，或切换镜像/自选模型）。
 ///
-/// 其他约定：
-///  - 通过 [ColorizationService] 复用的 [com.github.kiastr.venera_ssr/colorize] MethodChannel
-///    的 `copyUri` 方法完成“自选本地模型”的拷贝（不额外新增原生方法）。
-///  - 每个模型的调用位置为 [getApplicationSupportDirectory]/<fileName>，
-///    原生 [ColorizeEngine.colorizeEsrgan] 经 createSession(modelPath) 直接读取。
+/// Model files are streamed and validated before replacement on every platform.
 class Anime4KV4ModelManager {
-  /// 模型注册表：4x 动画模型 + 2x 通用模型。新增权重只需在此追加一项。
+  /// Lightweight animation defaults and optional general-purpose RRDB models.
   static final List<V4ModelDef> models = [
     V4ModelDef(
       id: 'anime4k_acnet',
@@ -55,12 +59,17 @@ class Anime4KV4ModelManager {
       displayName: 'Anime4K v4 ACNet (2×)',
       scale: 2,
       sizeHintMB: 2,
-      // ACNet 官方 onnx 仅 ~21KB，远小于 4MB：直接打包进 APK，开箱即用（同 deoldify 模式）
+      // The compact official ACNet model is bundled for offline first use.
       bundledAssetPath: 'assets/models/anime4k_acnet.onnx',
       defaultUrls: [
         'https://ghproxy.net/https://github.com/Kiastr/Venera-SSR/releases/download/model/anime4k_acnet.onnx',
         'https://github.com/Kiastr/Venera-SSR/releases/download/model/anime4k_acnet.onnx',
       ],
+      sourceUrl: 'https://github.com/TianZerL/Anime4KCPP',
+      licenseNote:
+          'Official Anime4KCPP ACNet distribution; retain the upstream license and notices.',
+      protocolNote:
+          'esrgan: 1-channel luminance input/output, 2×; original chroma retained.',
     ),
     V4ModelDef(
       id: 'anime4k_x4',
@@ -73,41 +82,55 @@ class Anime4KV4ModelManager {
         'https://ghproxy.net/https://github.com/Kiastr/Venera-SSR/releases/download/model/realesr_animevideov3.onnx',
         'https://github.com/Kiastr/Venera-SSR/releases/download/model/realesr_animevideov3.onnx',
       ],
+      sourceUrl: 'https://github.com/xinntao/Real-ESRGAN',
+      licenseNote:
+          'Real-ESRGAN: BSD-3-Clause; existing third-party animevideov3 ONNX distribution.',
+      protocolNote:
+          'esrgan: RGB 0..1 → RGB 0..1, 4×; lightweight animation model.',
     ),
     V4ModelDef(
-      id: 'general_x2',
-      fileName: 'realesr_general_x2c.onnx',
-      displayName: '通用 2× (Real-ESRGAN)',
+      id: 'realesrgan_x2plus',
+      fileName: 'realesrgan_x2plus.onnx',
+      displayName: 'RealESRGAN-x2plus (~67 MB, slower, general-purpose)',
       scale: 2,
-      sizeHintMB: 8,
-      bundledAssetPath: null, // 运行时下载
+      sizeHintMB: 67,
       defaultUrls: [
-        'https://ghproxy.net/https://github.com/Kiastr/Venera-SSR/releases/download/model/realesr_general_x2c.onnx',
-        'https://github.com/Kiastr/Venera-SSR/releases/download/model/realesr_general_x2c.onnx',
+        'https://huggingface.co/SceneWorks/real-esrgan-onnx/resolve/09f741bac80a246b407da3ee902bf5f3291b602f/real_esrgan_x2.onnx',
       ],
+      sha256Digest:
+          '7115ba92e8a1bfa63d68558ef006ef3d91273a068d321b1439f8bb1c9179002c',
+      sourceUrl: 'https://huggingface.co/SceneWorks/real-esrgan-onnx',
+      licenseNote:
+          'BSD-3-Clause. Weights: Xintao Wang / Real-ESRGAN; ONNX export: SceneWorks. Preserve copyright, license and disclaimer. Not manga-specialized; GAN may redraw details.',
+      protocolNote:
+          'esrgan: float32 [1,3,H,W] RGB 0..1 → [1,3,2H,2W]; even input tiles, original output cropped to 2×. 67,073,434 bytes; 23-block RRDB, slower than ACNet.',
+    ),
+    V4ModelDef(
+      id: 'realesrgan_x4plus',
+      fileName: 'realesrgan_x4plus.onnx',
+      displayName: 'RealESRGAN-x4plus (~67 MB, slower, general-purpose)',
+      scale: 4,
+      sizeHintMB: 67,
+      defaultUrls: [
+        'https://huggingface.co/SceneWorks/real-esrgan-onnx/resolve/09f741bac80a246b407da3ee902bf5f3291b602f/real_esrgan_x4.onnx',
+      ],
+      sha256Digest:
+          '5c586662929cbc686c1a5c38d9c060dbdb4ea5863a1f7672b8c0761e6b89c033',
+      sourceUrl: 'https://huggingface.co/SceneWorks/real-esrgan-onnx',
+      licenseNote:
+          'BSD-3-Clause. Weights: Xintao Wang / Real-ESRGAN; ONNX export: SceneWorks. Preserve copyright, license and disclaimer. Not manga-specialized; GAN may redraw details.',
+      protocolNote:
+          'esrgan: float32 [1,3,H,W] RGB 0..1 → [1,3,4H,4W]. 67,051,616 bytes; 23-block RRDB, slower with higher memory use. Not x4plus-anime-6B.',
     ),
   ];
 
-  /// 有效模型最小体积（8KB）。ACNet onnx 仅 ~21KB、animevideov3 约 4MB、general-x2c 约 8MB；
-  /// 下限用于拦掉损坏/空文件（下载错误页通常仅数 KB，<8KB 视为无效）。
-  static const int _validModelMinSize = 8 * 1024;
-
   static const String _selectedModelKey = 'anime4kV4_selected_model';
   static String _selectedModelId = 'anime4k_acnet';
+  static bool legacySelectionMigrated = false;
 
-  static List<String> _modelUrls = [];
-  static bool _urlsLoaded = false;
-
-  static bool _customModelActive = false;
-  static String? _customModelName;
-
-  static String? _cachedModelPath;
-  static bool _isDownloading = false;
-  static double _downloadProgress = 0.0;
-  static String? _currentStatus;
-
-  /// 有效模型的最小体积（字节），供 UI 侧拷贝后做体积校验
-  static int get validModelMinSize => _validModelMinSize;
+  static final ValueNotifier<ModelDownloadState?> downloadState =
+      ValueNotifier<ModelDownloadState?>(null);
+  static Future<void>? _downloadTask;
 
   static V4ModelDef _modelById(String id) =>
       models.firstWhere((m) => m.id == id, orElse: () => models.first);
@@ -123,80 +146,68 @@ class Anime4KV4ModelManager {
 
   static bool isValidModelId(String id) => models.any((m) => m.id == id);
 
-  /// 切换当前选中模型并持久化；重置内存态（含下载/自选状态），下次读取从 prefs 重载。
+  /// Retired preset had no working release. Never reuse its file or custom
+  /// record as x2plus; those files remain untouched for explicit local import.
+  static String migrateModelId(String id) {
+    if (id != 'general_x2') return id;
+    legacySelectionMigrated = true;
+    return 'realesrgan_x2plus';
+  }
+
+  /// Persist the selected preset; installations and custom records stay isolated.
   static Future<void> setSelectedModelId(String id) async {
+    id = migrateModelId(id);
     if (!isValidModelId(id)) return;
     _selectedModelId = id;
-    _resetMemState();
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_selectedModelKey, id);
   }
 
-  static void _resetMemState() {
-    _urlsLoaded = false;
-    _customModelActive = false;
-    _customModelName = null;
-    _cachedModelPath = null;
-    _isDownloading = false;
-    _downloadProgress = 0.0;
-    _currentStatus = null;
-  }
-
-  /// 获取当前生效的镜像 URL 列表（懒加载 + 持久化）
-  static Future<List<String>> getModelUrls() async {
-    final def = selectedDef;
-    final key = 'anime4kV4_urls_${def.id}';
-    if (!_urlsLoaded) {
-      final prefs = await SharedPreferences.getInstance();
-      final saved = prefs.getStringList(key);
-      _modelUrls = (saved != null && saved.isNotEmpty)
-          ? List.from(saved)
-          : List.from(def.defaultUrls);
-      _urlsLoaded = true;
-    }
-    return List.from(_modelUrls);
+  /// Read mirror preferences for the captured model, including an empty list.
+  static Future<List<String>> getModelUrls({V4ModelDef? model}) async {
+    final def = model ?? selectedDef;
+    final prefs = await SharedPreferences.getInstance();
+    return List.from(
+      prefs.getStringList('anime4kV4_urls_${def.id}') ?? def.defaultUrls,
+    );
   }
 
   static Future<void> addModelUrl(String url) async {
-    await getModelUrls();
+    final def = selectedDef;
+    final urls = await getModelUrls(model: def);
     final trimmed = url.trim();
-    if (trimmed.isEmpty || _modelUrls.contains(trimmed)) return;
-    _modelUrls.add(trimmed);
+    if (trimmed.isEmpty || urls.contains(trimmed)) return;
+    urls.add(trimmed);
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList('anime4kV4_urls_${selectedDef.id}', _modelUrls);
+    await prefs.setStringList('anime4kV4_urls_${def.id}', urls);
   }
 
   static Future<void> removeModelUrlAt(int index) async {
-    await getModelUrls();
-    if (index < 0 || index >= _modelUrls.length) return;
-    _modelUrls.removeAt(index);
+    final def = selectedDef;
+    final urls = await getModelUrls(model: def);
+    if (index < 0 || index >= urls.length) return;
+    urls.removeAt(index);
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList('anime4kV4_urls_${selectedDef.id}', _modelUrls);
+    await prefs.setStringList('anime4kV4_urls_${def.id}', urls);
   }
 
   static Future<void> resetModelUrls() async {
     final def = selectedDef;
-    _modelUrls = List.from(def.defaultUrls);
-    _urlsLoaded = true;
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList('anime4kV4_urls_${def.id}', _modelUrls);
+    await prefs.remove('anime4kV4_urls_${def.id}');
   }
 
-  static Future<bool> isCustomModelActive() async {
-    if (_customModelActive) return true;
-    final def = selectedDef;
+  static Future<bool> isCustomModelActive({V4ModelDef? model}) async {
+    final def = model ?? selectedDef;
     final prefs = await SharedPreferences.getInstance();
-    _customModelActive =
-        prefs.getBool('anime4kV4_custom_${def.id}') ?? false;
-    return _customModelActive;
+    return (prefs.getBool('anime4kV4_custom_${def.id}') ?? false) &&
+        await ensureModelAvailable(model: def) != null;
   }
 
   static Future<String?> getCustomModelName() async {
-    if (_customModelName != null) return _customModelName;
     final def = selectedDef;
     final prefs = await SharedPreferences.getInstance();
-    _customModelName = prefs.getString('anime4kV4_custom_name_${def.id}');
-    return _customModelName;
+    return prefs.getString('anime4kV4_custom_name_${def.id}');
   }
 
   /// 回退到内置（下载）模型：删除被覆盖的模型调用位置文件，若存在此前备份则还原。
@@ -204,47 +215,46 @@ class Anime4KV4ModelManager {
     final def = selectedDef;
     final dir = await getApplicationSupportDirectory();
     final targetPath = path.join(dir.path, def.fileName);
-    final bakPath = '$targetPath.bak';
-    final targetFile = File(targetPath);
-    if (await targetFile.exists()) {
-      await targetFile.delete();
+    final backup = File('$targetPath.bak');
+    if (await backup.exists()) {
+      await ImageAiService.instance.installStagedModel(
+        backup.path,
+        targetPath,
+        'esrgan',
+      );
+    } else {
+      await ImageAiService.instance.resetSession();
+      final target = File(targetPath);
+      if (await target.exists()) await target.delete();
     }
-    if (await File(bakPath).exists()) {
-      await File(bakPath).rename(targetPath);
-    }
-    _cachedModelPath = null;
-    _customModelActive = false;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('anime4kV4_custom_${def.id}', false);
     await prefs.remove('anime4kV4_custom_name_${def.id}');
+    await prefs.remove('anime4kV4_bundled_${def.id}');
+    await extractBundledModelIfNeeded();
   }
 
   /// 标记“模型调用位置的文件”为自选外部模型（写 prefs + 刷新缓存路径）。
-  static Future<void> markCustomModelActive(String displayName) async {
-    final def = selectedDef;
+  static Future<void> markCustomModelActive(
+    String displayName, {
+    V4ModelDef? model,
+  }) async {
+    final def = model ?? selectedDef;
     final dir = await getApplicationSupportDirectory();
     final targetPath = path.join(dir.path, def.fileName);
-    _cachedModelPath = targetPath;
-    _customModelActive = true;
-    _customModelName = displayName;
+    await ImageAiService.instance.getModelInfo(targetPath, 'esrgan');
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('anime4kV4_custom_${def.id}', true);
     await prefs.setString('anime4kV4_custom_name_${def.id}', displayName);
   }
 
-  /// 把打包进 APK 的模型（assets）抽取到应用目录（模型调用位置），仅在需要时执行一次。
-  ///
-  /// 触发条件（全部满足才回灌）：
-  ///  1. 未启用“自选外部模型”（用户自选优先，绝不覆盖）；
-  ///  2. 模型调用位置当前没有有效文件（不存在或体积 < 下限）；
-  ///  3. 尚未标记为“打包模型已安装”——用户手动删除后不自动回灌，尊重用户意愿。
-  ///
-  /// assets 中缺少该模型（例如 2x 模型未打包）时静默跳过，让下载管理器接管，保证 APK 始终可构建。
+  /// Extract the bundled model once unless the user selected an external model
+  /// or explicitly deleted this installation. Validate before publishing it.
   static Future<void> extractBundledModelIfNeeded() async {
     try {
       final def = selectedDef;
       // 用户自选外部模型时不覆盖
-      if (await isCustomModelActive()) return;
+      if (await isCustomModelActive(model: def)) return;
 
       final prefs = await SharedPreferences.getInstance();
       final installedKey = 'anime4kV4_bundled_${def.id}';
@@ -257,9 +267,9 @@ class Anime4KV4ModelManager {
       final targetPath = path.join(dir.path, def.fileName);
       final targetFile = File(targetPath);
 
-      // 已有有效模型（下载/导入）则无需抽取，直接标记完成
-      if (await targetFile.exists() &&
-          await targetFile.length() > _validModelMinSize) {
+      // An installed file is not overwritten, even when validation rejects it.
+      if (await targetFile.exists()) {
+        await ImageAiService.instance.getModelInfo(targetPath, 'esrgan');
         await prefs.setBool(installedKey, true);
         return;
       }
@@ -281,7 +291,7 @@ class Anime4KV4ModelManager {
         data.offsetInBytes,
         data.lengthInBytes,
       );
-      if (bytes.length <= _validModelMinSize) {
+      if (bytes.isEmpty) {
         // 打包文件异常（过小），不写入，交给下载流程
         return;
       }
@@ -290,57 +300,39 @@ class Anime4KV4ModelManager {
       final tmpPath = '$targetPath.bundle.tmp';
       final tmpFile = File(tmpPath);
       await tmpFile.writeAsBytes(bytes, flush: true);
-      await tmpFile.rename(targetPath);
+      await ImageAiService.instance.installStagedModel(
+        tmpPath,
+        targetPath,
+        'esrgan',
+      );
 
       await prefs.setBool(installedKey, true);
-      _cachedModelPath = targetPath;
-      Log.info('Anime4KV4',
-          'bundled model (${def.id}) extracted to $targetPath (${bytes.length} bytes)');
+      Log.info(
+        'Anime4KV4',
+        'bundled model (${def.id}) extracted to $targetPath (${bytes.length} bytes)',
+      );
     } catch (e, s) {
       Log.error('Anime4KV4', 'extractBundledModelIfNeeded failed: $e\n$s');
+      ImageAiService.instance.reportError(
+        e,
+        operation: 'Bundled super-resolution model unavailable',
+      );
     }
   }
 
   /// 获取模型文件路径（即模型调用位置）。不自动下载；文件不存在或无效则返回 null。
-  static Future<String?> ensureModelAvailable() async {
-    final def = selectedDef;
-    if (_cachedModelPath != null) {
-      final f = File(_cachedModelPath!);
-      if (await f.exists() && await f.length() > _validModelMinSize) {
-        return _cachedModelPath!;
-      }
-      _cachedModelPath = null;
-    }
-
+  static Future<String?> ensureModelAvailable({V4ModelDef? model}) async {
+    final def = model ?? selectedDef;
     final dir = await getApplicationSupportDirectory();
-    final targetPath = path.join(dir.path, def.fileName);
-    final targetFile = File(targetPath);
-
-    if (await targetFile.exists()) {
-      final size = await targetFile.length();
-      if (size > _validModelMinSize) {
-        _cachedModelPath = targetPath;
-        return targetPath;
-      }
-      await targetFile.delete();
-    }
-
-    return null;
+    final target = File(path.join(dir.path, def.fileName));
+    return await target.exists() && await target.length() > 0
+        ? target.path
+        : null;
   }
 
-  /// 模型是否已下载且完整（含自选外部模型）
-  static Future<bool> get isModelDownloaded async {
-    final def = selectedDef;
-    final dir = await getApplicationSupportDirectory();
-    final targetPath = path.join(dir.path, def.fileName);
-    final targetFile = File(targetPath);
-    if (await targetFile.exists()) {
-      final size = await targetFile.length();
-      if (size > _validModelMinSize) return true;
-    }
-    if (_cachedModelPath != null) return true;
-    return false;
-  }
+  /// Whether a model file is installed; readiness requires native validation.
+  static Future<bool> get isModelDownloaded async =>
+      await ensureModelAvailable() != null;
 
   static Future<int> getDownloadedSize() async {
     final def = selectedDef;
@@ -351,72 +343,115 @@ class Anime4KV4ModelManager {
     return await targetFile.length();
   }
 
-  static double get downloadProgress => _downloadProgress;
-  static bool get isDownloading => _isDownloading;
-  static String? get currentStatus => _currentStatus;
+  static double get downloadProgress => downloadState.value?.progress ?? 0;
+  static bool get isDownloading => _downloadTask != null;
+  static String? get currentStatus => downloadState.value?.message;
 
-  /// 手动触发模型下载，支持进度回调和断点续传。
+  /// Downloads independently of observers; concurrent callers share one task.
   static Future<void> downloadModel({
     void Function(double progress)? onProgress,
     void Function(String status)? onStatus,
-  }) async {
-    if (_isDownloading) {
-      throw Exception('Model is already downloading');
-    }
-
+  }) {
+    final existing = _downloadTask;
     final def = selectedDef;
-    final dir = await getApplicationSupportDirectory();
-    final targetPath = path.join(dir.path, def.fileName);
-    final tempPath = '$targetPath.tmp';
-    final tempFile = File(tempPath);
+    final task =
+        existing ??
+        (_downloadTask = Future<void>.microtask(() => _downloadModel(def)));
+    return forwardModelDownloadCallbacks(
+      task,
+      downloadState,
+      onProgress: onProgress,
+      onStatus: onStatus,
+      replay: existing != null,
+    );
+  }
 
-    _isDownloading = true;
-    _downloadProgress = 0.0;
-
-    void reportStatus(String status) {
-      _currentStatus = status;
-      onStatus?.call(status);
+  static Future<void> _downloadModel(V4ModelDef def) async {
+    var receivedBytes = 0;
+    var totalBytes = 0;
+    var message = 'Preparing download...';
+    void report({String? status, bool active = true, String? error}) {
+      if (status != null) message = status;
+      downloadState.value = ModelDownloadState(
+        modelId: def.id,
+        modelName: def.displayName,
+        message: message,
+        receivedBytes: receivedBytes,
+        totalBytes: totalBytes,
+        isDownloading: active,
+        error: error,
+      );
     }
 
     try {
+      report();
+      final dir = await getApplicationSupportDirectory();
+      final targetPath = path.join(dir.path, def.fileName);
+      final tempPath = '$targetPath.tmp';
+      final tempFile = File(tempPath);
       if (await tempFile.exists()) {
         await tempFile.delete();
       }
 
-      Exception? lastError;
-      final urls = await getModelUrls();
+      Object? lastError;
+      StackTrace? lastStack;
+      final urls = await getModelUrls(model: def);
       for (int i = 0; i < urls.length; i++) {
-        final url = urls[i];
-        reportStatus('Trying mirror ${i + 1}/${urls.length}...');
+        receivedBytes = 0;
+        totalBytes = 0;
+        report(status: 'Downloading from mirror ${i + 1}/${urls.length}...');
         try {
-          await _downloadWithResume(url, tempPath, (received, total) {
-            _downloadProgress = total > 0 ? received / total : 0;
-            onProgress?.call(_downloadProgress);
+          await _downloadWithResume(urls[i], tempPath, (received, total) {
+            receivedBytes = received;
+            totalBytes = total;
+            report();
           });
-          final downloaded = await File(tempPath).length();
-          if (downloaded > _validModelMinSize) {
-            await File(tempPath).rename(targetPath);
-            _cachedModelPath = targetPath;
-            _customModelActive = false;
-            final prefs = await SharedPreferences.getInstance();
-            await prefs.setBool('anime4kV4_custom_${def.id}', false);
-            await prefs.remove('anime4kV4_custom_name_${def.id}');
-            _downloadProgress = 1.0;
-            reportStatus('Download complete');
-            return;
+          final downloaded = await tempFile.length();
+          if (downloaded == 0) {
+            throw StateError('Empty model download');
           }
-          await File(tempPath).delete();
-        } catch (e) {
-          lastError = e is Exception ? e : Exception(e.toString());
-          reportStatus('Mirror ${i + 1} failed: $e');
+          if (def.sha256Digest != null) {
+            report(status: 'Verifying SHA-256...');
+            final digest = await ImageAiService.instance.modelIdentity(
+              tempFile.path,
+            );
+            if (digest != def.sha256Digest) {
+              throw StateError('Model SHA-256 mismatch');
+            }
+          }
+          report(status: 'Validating and installing model...');
+          await ImageAiService.instance.installStagedModel(
+            tempPath,
+            targetPath,
+            'esrgan',
+          );
+          final oldBackup = File('$targetPath.bak');
+          if (await oldBackup.exists()) await oldBackup.delete();
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setBool('anime4kV4_custom_${def.id}', false);
+          await prefs.remove('anime4kV4_custom_name_${def.id}');
+          receivedBytes = downloaded;
+          totalBytes = downloaded;
+          report(status: 'Download complete', active: false);
+          return;
+        } catch (error, stack) {
+          lastError = error;
+          lastStack = stack;
+          report(status: 'Mirror ${i + 1} failed: $error');
           if (await tempFile.exists()) {
             await tempFile.delete();
           }
         }
       }
-      throw lastError ?? Exception('All model download URLs failed');
+      if (lastError != null) {
+        Error.throwWithStackTrace(lastError, lastStack!);
+      }
+      throw StateError('All model download URLs failed');
+    } catch (error) {
+      report(status: 'Download failed: $error', active: false, error: '$error');
+      rethrow;
     } finally {
-      _isDownloading = false;
+      _downloadTask = null;
     }
   }
 
@@ -450,6 +485,7 @@ class Anime4KV4ModelManager {
         throw Exception('HTTP ${response.statusCode}');
       }
 
+      if (response.statusCode == HttpStatus.ok) startByte = 0;
       final contentLength = response.contentLength;
       int received = startByte;
       final total = contentLength > 0 ? contentLength + startByte : 0;
@@ -458,14 +494,16 @@ class Anime4KV4ModelManager {
         mode: startByte > 0 ? FileMode.append : FileMode.write,
       );
 
-      await for (final chunk in response) {
-        sink.add(chunk);
-        received += chunk.length;
-        onProgress(received, total);
-      }
+      await sink.addStream(
+        response.map((chunk) {
+          received += chunk.length;
+          onProgress(received, total);
+          return chunk;
+        }),
+      );
       await sink.close();
     } catch (e) {
-      sink?.close();
+      await sink?.close();
       rethrow;
     } finally {
       client.close();
@@ -474,6 +512,7 @@ class Anime4KV4ModelManager {
 
   /// 清除模型文件（含自选外部模型备份）
   static Future<void> clearModel() async {
+    await ImageAiService.instance.resetSession();
     final def = selectedDef;
     final dir = await getApplicationSupportDirectory();
     final targetPath = path.join(dir.path, def.fileName);
@@ -491,16 +530,10 @@ class Anime4KV4ModelManager {
     if (await bakFile.exists()) {
       await bakFile.delete();
     }
-    _cachedModelPath = null;
-    _customModelActive = false;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('anime4kV4_custom_${def.id}', false);
     await prefs.remove('anime4kV4_custom_name_${def.id}');
+    // An explicit deletion must also suppress first-use bundle extraction.
+    await prefs.setBool('anime4kV4_bundled_${def.id}', true);
   }
-
-  /// 通过原生 ContentResolver（colorize 通道的 copyUri）把 content URI / 文件路径以
-  /// 有界分块（64KB）方式拷贝到模型调用位置，避免一次性读入内存（OOM）或拷坏。
-  /// 实际文件拷贝由 [ColorizationService.copyUriTo] 经原生完成。
-  static Future<int> copyUriTo(String uri, String dest) =>
-      ColorizationService.instance.copyUriTo(uri, dest);
 }

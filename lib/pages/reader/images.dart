@@ -14,15 +14,21 @@ class _ReaderImagesState extends State<_ReaderImages> {
 
   late _ReaderState reader;
 
+  void _onProcessingChanged() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void initState() {
     reader = context.reader;
     reader.isLoading = true;
+    imageAiSettingsRevision.addListener(_onProcessingChanged);
     super.initState();
   }
 
   @override
   void dispose() {
+    imageAiSettingsRevision.removeListener(_onProcessingChanged);
     super.dispose();
     ImageDownloader.cancelAllLoadingImages();
   }
@@ -134,11 +140,13 @@ class _ReaderImagesState extends State<_ReaderImages> {
             true;
         return _GalleryMode(
           key: Key(
-            '${reader.mode.key}_${reader.imagesPerPage}_${showComments}_$showCommentsAtEnd',
+            '${reader.mode.key}_${reader.imagesPerPage}_${showComments}_${showCommentsAtEnd}_${imageAiSettingsRevision.value}',
           ),
         );
       } else {
-        return _ContinuousMode(key: Key(reader.mode.key));
+        return _ContinuousMode(
+          key: Key('${reader.mode.key}_${imageAiSettingsRevision.value}'),
+        );
       }
     }
   }
@@ -155,7 +163,17 @@ class _GalleryModeState extends State<_GalleryMode>
     implements _ImageViewController {
   late PageController controller;
 
-  int get preCacheCount => appdata.settings["preloadImageCount"];
+  int get preCacheCount => appdata.settings.getReaderSetting(
+    reader.cid,
+    reader.type.sourceKey,
+    'preloadImageCount',
+  );
+
+  final _preloader = ReaderPreloader();
+
+  void _onPreloadSettingsChanged() {
+    if (mounted) cache(reader.page);
+  }
 
   var photoViewControllers = <int, PhotoViewController>{};
 
@@ -206,10 +224,19 @@ class _GalleryModeState extends State<_GalleryMode>
     reader = context.reader;
     controller = PageController(initialPage: reader.page);
     reader._imageViewController = this;
+    appdata.settings.addListener(_onPreloadSettingsChanged);
     Future.microtask(() {
       context.readerScaffold.setFloatingButton(0);
     });
     super.initState();
+  }
+
+  @override
+  void dispose() {
+    appdata.settings.removeListener(_onPreloadSettingsChanged);
+    _preloader.dispose();
+    controller.dispose();
+    super.dispose();
   }
 
   /// Get the range of images for the given page. [page] is 1-based.
@@ -247,25 +274,21 @@ class _GalleryModeState extends State<_GalleryMode>
   }
 
   void cache(int startPage) {
-    for (int i = startPage - 1; i <= startPage + preCacheCount; i++) {
-      if (i == startPage ||
-          i <= 0 ||
-          i > totalPages ||
-          isChapterCommentsPage(i)) {
-        continue;
+    final pages = <ReaderImageProvider>[];
+    void addPage(int page) {
+      if (page <= 0 || page > totalPages || isChapterCommentsPage(page)) return;
+      final (start, end) = getPageImagesRange(page);
+      for (var index = start; index < end; index++) {
+        pages.add(_createImageProvider(index + 1, context));
       }
-      _cachePage(i, i == startPage + 1 || i == startPage - 1);
     }
-  }
 
-  void _cachePage(int page, bool shouldPreCache) {
-    if (isChapterCommentsPage(page)) return;
-    var (startIndex, endIndex) = getPageImagesRange(page);
-    for (int i = startIndex; i < endIndex; i++) {
-      shouldPreCache
-          ? _precacheImage(i + 1, context)
-          : _preDownloadImage(i + 1, context);
+    addPage(startPage + 1);
+    addPage(startPage - 1);
+    for (var page = startPage + 2; page <= startPage + preCacheCount; page++) {
+      addPage(page);
     }
+    _preloader.update(pages);
   }
 
   Widget _buildChapterCommentsPage() {
@@ -284,6 +307,7 @@ class _GalleryModeState extends State<_GalleryMode>
 
   @override
   Widget build(BuildContext context) {
+    cache(reader.page);
     return Listener(
       onPointerDown: (event) {
         fingers++;
@@ -325,8 +349,6 @@ class _GalleryModeState extends State<_GalleryMode>
               startIndex,
               endIndex,
             );
-
-            cache(index);
 
             photoViewControllers[index] ??= PhotoViewController();
 
@@ -371,7 +393,8 @@ class _GalleryModeState extends State<_GalleryMode>
         ),
         onPageChanged: (i) {
           if (i == 0) {
-            if (reader.isFirstChapterOfGroup || !reader.toPrevChapter(toLastPage: true)) {
+            if (reader.isFirstChapterOfGroup ||
+                !reader.toPrevChapter(toLastPage: true)) {
               controller.jumpToPage(1);
             }
           } else if (i == totalPages + 1) {
@@ -380,6 +403,7 @@ class _GalleryModeState extends State<_GalleryMode>
             }
           } else {
             reader.setPage(i);
+            cache(i);
             context.readerScaffold.update();
             // Auto close toolbar when entering chapter comments page
             if (isChapterCommentsPage(i) && context.readerScaffold.isOpen) {
@@ -419,7 +443,7 @@ class _GalleryModeState extends State<_GalleryMode>
             image: _createImageProviderFromKey(
               images[0],
               context,
-              startIndex + 1,
+              startIndex + (reverse ? 2 : 1),
             ),
             fit: BoxFit.contain,
             alignment: axis == Axis.vertical
@@ -436,7 +460,7 @@ class _GalleryModeState extends State<_GalleryMode>
             image: _createImageProviderFromKey(
               images[1],
               context,
-              startIndex + 2,
+              startIndex + (reverse ? 1 : 2),
             ),
             fit: BoxFit.contain,
             alignment: axis == Axis.vertical
@@ -448,12 +472,12 @@ class _GalleryModeState extends State<_GalleryMode>
         ),
       ];
     } else {
-      imageWidgets = images.map((imageKey) {
-        startIndex++;
+      imageWidgets = images.indexed.map((entry) {
+        final (index, imageKey) = entry;
         ImageProvider imageProvider = _createImageProviderFromKey(
           imageKey,
           context,
-          startIndex,
+          startIndex + (reverse ? images.length - index : index + 1),
         );
         return Expanded(
           child: ComicImage(
@@ -594,20 +618,7 @@ class _GalleryModeState extends State<_GalleryMode>
   }
 
   @override
-  Future<Uint8List?> getImageByOffset(Offset offset) async {
-    var imageKey = getImageKeyByOffset(offset);
-    if (imageKey == null) return null;
-    if (imageKey.startsWith("file://")) {
-      return await File(imageKey.substring(7)).readAsBytes();
-    } else {
-      return (await CacheManager().findCache(
-        "$imageKey@${context.reader.type.sourceKey}@${context.reader.cid}@${context.reader.eid}",
-      ))!.readAsBytes();
-    }
-  }
-
-  @override
-  String? getImageKeyByOffset(Offset offset) {
+  ReaderImageProvider? getImageProviderByOffset(Offset offset) {
     var range = getCurrentPageImageRange();
     if (range == null) return null;
 
@@ -615,21 +626,20 @@ class _GalleryModeState extends State<_GalleryMode>
     int actualImageCount = endIndex - startIndex;
 
     if (actualImageCount == 1) {
-      return reader.images![startIndex];
+      return _createImageProvider(startIndex + 1, context);
     }
 
     for (var imageState in imageStates) {
       if ((imageState as _ComicImageState).containsPoint(offset)) {
-        var imageKey =
-            (imageState.widget.image as ReaderImageProvider).imageKey;
-        int index = reader.images!.indexOf(imageKey);
+        var provider = imageState.widget.image as ReaderImageProvider;
+        int index = provider.page - 1;
         if (index >= startIndex && index < endIndex) {
-          return imageKey;
+          return provider;
         }
       }
     }
 
-    return reader.images![startIndex];
+    return _createImageProvider(startIndex + 1, context);
   }
 }
 
@@ -666,9 +676,17 @@ class _ContinuousModeState extends State<_ContinuousMode>
   var fingers = 0;
   bool disableScroll = false;
 
-  late List<bool> cached;
+  int get preCacheCount => appdata.settings.getReaderSetting(
+    reader.cid,
+    reader.type.sourceKey,
+    'preloadImageCount',
+  );
 
-  int get preCacheCount => appdata.settings["preloadImageCount"];
+  final _preloader = ReaderPreloader();
+
+  void _onPreloadSettingsChanged() {
+    if (mounted) cacheImages(reader.page);
+  }
 
   /// Whether the user was scrolling the page.
   /// The gesture detector has a delay to detect tap event.
@@ -697,17 +715,18 @@ class _ContinuousModeState extends State<_ContinuousMode>
     reader = context.reader;
     reader._imageViewController = this;
     itemPositionsListener.itemPositions.addListener(onPositionChanged);
-    cached = List.filled(reader.maxPage + 2, false);
-    Future.delayed(
-      const Duration(milliseconds: 100),
-      () => cacheImages(reader.page),
-    );
+    appdata.settings.addListener(_onPreloadSettingsChanged);
+    Future<void>(() {
+      if (mounted) cacheImages(reader.page);
+    });
     super.initState();
   }
 
   @override
   void dispose() {
     itemPositionsListener.itemPositions.removeListener(onPositionChanged);
+    appdata.settings.removeListener(_onPreloadSettingsChanged);
+    _preloader.dispose();
     super.dispose();
   }
 
@@ -783,12 +802,14 @@ class _ContinuousModeState extends State<_ContinuousMode>
   }
 
   void cacheImages(int current) {
-    for (int i = current + 1; i <= current + preCacheCount; i++) {
-      if (i <= reader.maxPage && !cached[i]) {
-        _preDownloadImage(i, context);
-        cached[i] = true;
-      }
-    }
+    _preloader.update([
+      for (
+        var page = current + 1;
+        page <= math.min(reader.maxPage, current + preCacheCount);
+        page++
+      )
+        _createImageProvider(page, context),
+    ]);
   }
 
   void onScroll() {
@@ -1178,31 +1199,18 @@ class _ContinuousModeState extends State<_ContinuousMode>
   }
 
   @override
-  Future<Uint8List?> getImageByOffset(Offset offset) async {
-    var imageKey = getImageKeyByOffset(offset);
-    if (imageKey == null) return null;
-    if (imageKey.startsWith("file://")) {
-      return await File(imageKey.substring(7)).readAsBytes();
-    } else {
-      return (await CacheManager().findCache(
-        "$imageKey@${context.reader.type.sourceKey}@${context.reader.cid}@${context.reader.eid}",
-      ))!.readAsBytes();
-    }
-  }
-
-  @override
-  String? getImageKeyByOffset(Offset offset) {
-    String? imageKey;
+  ReaderImageProvider? getImageProviderByOffset(Offset offset) {
+    ReaderImageProvider? provider;
     for (var imageState in imageStates) {
       if ((imageState as _ComicImageState).containsPoint(offset)) {
-        imageKey = (imageState.widget.image as ReaderImageProvider).imageKey;
+        provider = imageState.widget.image as ReaderImageProvider;
       }
     }
-    return imageKey;
+    return provider;
   }
 }
 
-ImageProvider _createImageProviderFromKey(
+ReaderImageProvider _createImageProviderFromKey(
   String imageKey,
   BuildContext context,
   int page,
@@ -1210,44 +1218,17 @@ ImageProvider _createImageProviderFromKey(
   var reader = context.reader;
   return ReaderImageProvider(
     imageKey,
-    reader.type.comicSource?.key,
+    reader.type.sourceKey,
     reader.cid,
     reader.eid,
-    reader.page,
+    page,
   );
 }
 
-ImageProvider _createImageProvider(int page, BuildContext context) {
+ReaderImageProvider _createImageProvider(int page, BuildContext context) {
   var reader = context.reader;
   var imageKey = reader.images![page - 1];
   return _createImageProviderFromKey(imageKey, context, page);
-}
-
-/// [_precacheImage] is used to precache the image for the given page.
-/// The image is cached using the flutter's [precacheImage] method.
-/// The image will be downloaded and decoded into memory.
-void _precacheImage(int page, BuildContext context) {
-  if (page <= 0 || page > context.reader.images!.length) {
-    return;
-  }
-  precacheImage(_createImageProvider(page, context), context);
-}
-
-/// [_preDownloadImage] is used to download the image for the given page.
-/// The image is downloaded using the [CacheManager] and saved to the local storage.
-void _preDownloadImage(int page, BuildContext context) {
-  if (page <= 0 || page > context.reader.images!.length) {
-    return;
-  }
-  var reader = context.reader;
-  var imageKey = reader.images![page - 1];
-  if (imageKey.startsWith("file://")) {
-    return;
-  }
-  var cid = reader.cid;
-  var eid = reader.eid;
-  var sourceKey = reader.type.comicSource?.key;
-  ImageDownloader.loadComicImage(imageKey, sourceKey, cid, eid);
 }
 
 class _SwipeChangeChapterProgress extends StatefulWidget {

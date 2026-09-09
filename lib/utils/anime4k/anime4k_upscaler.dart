@@ -1,5 +1,4 @@
 import 'dart:math' as math;
-import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:image/image.dart' as img;
@@ -38,17 +37,8 @@ class Anime4KUpscaler {
   /// 在 Isolate 中处理图像超分
   /// [params] Anime4K 处理参数
   /// 返回处理后的图像字节数据 (PNG 格式)
-  static Future<Uint8List?> processInIsolate(Anime4KParams params) async {
-    try {
-      return await compute(_processImage, params);
-    } catch (e, s) {
-      debugPrint('Anime4K processing error: $e\n$s');
-      // Fallback: process in the current isolate so that transient isolate
-      // failures (e.g. on constrained CI runners) do not silently disable
-      // the feature.
-      return _processImage(params);
-    }
-  }
+  static Future<Uint8List?> processInIsolate(Anime4KParams params) =>
+      compute(_processImage, params);
 
   /// 在 Isolate 中执行的静态方法
   static Uint8List? _processImage(Anime4KParams params) {
@@ -73,9 +63,104 @@ class Anime4KUpscaler {
     }
   }
 
-  /// 直接在当前 Isolate 中处理图像（用于测试或作为 compute 失败时的回退）
+  /// Synchronous entry point for callers already executing outside the UI isolate.
   static Uint8List? processDirect(Anime4KParams params) {
     return _processImage(params);
+  }
+
+  /// Render strength separately so slider edits reuse the enhanced base image.
+  static Future<Uint8List> renderInIsolate(Anime4KRenderParams params) =>
+      compute(_render, params);
+
+  static Uint8List _render(Anime4KRenderParams params) {
+    if (params.strength == 1 && params.enhancedBytes != null) {
+      return params.enhancedBytes!;
+    }
+    final source = img.decodeImage(params.imageBytes);
+    if (source == null) throw StateError('Cannot decode the source image');
+    final width = (source.width * params.scaleFactor).round();
+    final height = (source.height * params.scaleFactor).round();
+    if (width < 1 || height < 1 || width * height > 32000000) {
+      throw StateError(
+        'Requested super-resolution image exceeds the 32 MP limit',
+      );
+    }
+    final enhanced = params.strength == 0
+        ? null
+        : img.decodeImage(params.enhancedBytes!);
+    if (params.strength > 0 && enhanced == null) {
+      throw StateError('Cannot decode the enhanced base image');
+    }
+    if (enhanced != null &&
+        (enhanced.width != width || enhanced.height != height)) {
+      throw StateError(
+        'Enhanced image dimensions do not match the output scale',
+      );
+    }
+    double linear(num value) {
+      final v = value / 255.0;
+      return v <= 0.04045
+          ? v / 12.92
+          : math.pow((v + 0.055) / 1.055, 2.4).toDouble();
+    }
+
+    int encoded(double value) {
+      final v = value.clamp(0.0, 1.0);
+      final srgb = v <= 0.0031308
+          ? 12.92 * v
+          : 1.055 * math.pow(v, 1 / 2.4) - 0.055;
+      return (srgb * 255).round().clamp(0, 255);
+    }
+
+    // Resample premultiplied, linear RGB. Interpolating straight sRGB produces
+    // dark/colored fringes around transparent lines and incorrect half-strength.
+    final linearSource = img.Image(
+      width: source.width,
+      height: source.height,
+      numChannels: 4,
+      format: img.Format.float32,
+    );
+    for (final p in source) {
+      final alpha = p.a / p.maxChannelValue;
+      linearSource.setPixelRgba(
+        p.x,
+        p.y,
+        linear(p.rNormalized * 255) * alpha,
+        linear(p.gNormalized * 255) * alpha,
+        linear(p.bNormalized * 255) * alpha,
+        alpha,
+      );
+    }
+    // image's cubic interpolator truncates channels to integers. The linear
+    // resize path preserves normalized float channels and premultiplied alpha.
+    final base = img.copyResize(
+      linearSource,
+      width: width,
+      height: height,
+      interpolation: img.Interpolation.linear,
+    );
+    final output = img.Image(width: width, height: height, numChannels: 4);
+    for (final p in base) {
+      final e = enhanced?.getPixel(p.x, p.y);
+      final strength = params.strength;
+      final ea = e == null ? 0.0 : e.a / e.maxChannelValue;
+      final alpha = (p.a * (1 - strength) + ea * strength)
+          .clamp(0.0, 1.0)
+          .toDouble();
+      double mix(num value, num enhancedValue) => alpha == 0
+          ? 0
+          : (value * (1 - strength) + linear(enhancedValue) * ea * strength) /
+                alpha;
+      output.setPixelRgba(
+        p.x,
+        p.y,
+        encoded(mix(p.r, e?.r ?? 0)),
+        encoded(mix(p.g, e?.g ?? 0)),
+        encoded(mix(p.b, e?.b ?? 0)),
+        (alpha * 255).round(),
+      );
+    }
+    return Uint8List.fromList(img.encodePng(output));
   }
 
   /// 对图像执行 Anime4K 超分处理
@@ -83,6 +168,11 @@ class Anime4KUpscaler {
     // 步骤1: 双线性插值放大
     final int newWidth = (source.width * scaleFactor).round();
     final int newHeight = (source.height * scaleFactor).round();
+    if (newWidth < 1 || newHeight < 1 || newWidth * newHeight > 32000000) {
+      throw StateError(
+        'Requested super-resolution image exceeds the 32 MP limit',
+      );
+    }
 
     final img.Image upscaled = img.copyResize(
       source,
@@ -129,11 +219,27 @@ class Anime4KUpscaler {
     while (remaining > 0) {
       final int current = remaining.clamp(0, 255);
       if (forward) {
-        _unblur(colorData, lumData, tempColorData, tempLumData, width, height,
-            current, edgeMask);
+        _unblur(
+          colorData,
+          lumData,
+          tempColorData,
+          tempLumData,
+          width,
+          height,
+          current,
+          edgeMask,
+        );
       } else {
-        _unblur(tempColorData, tempLumData, colorData, lumData, width, height,
-            current, edgeMask);
+        _unblur(
+          tempColorData,
+          tempLumData,
+          colorData,
+          lumData,
+          width,
+          height,
+          current,
+          edgeMask,
+        );
       }
       forward = !forward;
       remaining -= current;
@@ -146,26 +252,48 @@ class Anime4KUpscaler {
     }
 
     // 步骤4: 计算 Sobel 梯度
-    _computeGradient(colorData, lumData, tempColorData, tempLumData, width,
-        height);
+    _computeGradient(
+      colorData,
+      lumData,
+      tempColorData,
+      tempLumData,
+      width,
+      height,
+    );
     // 结果在 tempColorData/tempLumData 中
     colorData.setAll(0, tempColorData);
     lumData.setAll(0, tempLumData);
 
     // 步骤5: 梯度精炼
-    final int refineStrength =
-        (pushGradStrength * 255).round().clamp(0, 0xFFFF);
+    final int refineStrength = (pushGradStrength * 255).round().clamp(
+      0,
+      0xFFFF,
+    );
     remaining = refineStrength;
     forward = true;
 
     while (remaining > 0) {
       final int current = remaining.clamp(0, 255);
       if (forward) {
-        _gradientRefine(colorData, lumData, tempColorData, tempLumData, width,
-            height, current);
+        _gradientRefine(
+          colorData,
+          lumData,
+          tempColorData,
+          tempLumData,
+          width,
+          height,
+          current,
+        );
       } else {
-        _gradientRefine(tempColorData, tempLumData, colorData, lumData, width,
-            height, current);
+        _gradientRefine(
+          tempColorData,
+          tempLumData,
+          colorData,
+          lumData,
+          width,
+          height,
+          current,
+        );
       }
       forward = !forward;
       remaining -= current;
@@ -177,8 +305,11 @@ class Anime4KUpscaler {
     }
 
     // 写回图像
-    final img.Image result =
-        img.Image(width: width, height: height, numChannels: 4);
+    final img.Image result = img.Image(
+      width: width,
+      height: height,
+      numChannels: 4,
+    );
     for (int y = 0; y < height; y++) {
       for (int x = 0; x < width; x++) {
         final int idx = y * width + x;
@@ -189,7 +320,7 @@ class Anime4KUpscaler {
           _getRed(argb),
           _getGreen(argb),
           _getBlue(argb),
-          _getAlpha(argb),
+          upscaled.getPixel(x, y).a,
         );
       }
     }
@@ -231,10 +362,8 @@ class Anime4KUpscaler {
         final int b = lumData[id + yp];
         final int br = lumData[id + yp + xp];
 
-        final int xSobel =
-            (-tl + tr - l - l + r + r - bl + br).abs();
-        final int ySobel =
-            (-tl - t - t - tr + bl + b + b + br).abs();
+        final int xSobel = (-tl + tr - l - l + r + r - bl + br).abs();
+        final int ySobel = (-tl - t - t - tr + bl + b + b + br).abs();
         mask[id] = math
             .sqrt(xSobel * xSobel + ySobel * ySobel)
             .round()
@@ -299,36 +428,80 @@ class Anime4KUpscaler {
 
           switch (k) {
             case 0:
-              di0 = tli; di1 = ti; di2 = tri;
-              li0 = id; li1 = bli; li2 = bi; li3 = bri; l4 = true;
+              di0 = tli;
+              di1 = ti;
+              di2 = tri;
+              li0 = id;
+              li1 = bli;
+              li2 = bi;
+              li3 = bri;
+              l4 = true;
               break;
             case 1:
-              di0 = ti; di1 = tri; di2 = ri;
-              li0 = id; li1 = li; li2 = bi; l4 = false;
+              di0 = ti;
+              di1 = tri;
+              di2 = ri;
+              li0 = id;
+              li1 = li;
+              li2 = bi;
+              l4 = false;
               break;
             case 2:
-              di0 = tri; di1 = ri; di2 = bri;
-              li0 = id; li1 = tli; li2 = li; li3 = bli; l4 = true;
+              di0 = tri;
+              di1 = ri;
+              di2 = bri;
+              li0 = id;
+              li1 = tli;
+              li2 = li;
+              li3 = bli;
+              l4 = true;
               break;
             case 3:
-              di0 = ri; di1 = bri; di2 = bi;
-              li0 = id; li1 = ti; li2 = li; l4 = false;
+              di0 = ri;
+              di1 = bri;
+              di2 = bi;
+              li0 = id;
+              li1 = ti;
+              li2 = li;
+              l4 = false;
               break;
             case 4:
-              di0 = bli; di1 = bi; di2 = bri;
-              li0 = id; li1 = tli; li2 = ti; li3 = tri; l4 = true;
+              di0 = bli;
+              di1 = bi;
+              di2 = bri;
+              li0 = id;
+              li1 = tli;
+              li2 = ti;
+              li3 = tri;
+              l4 = true;
               break;
             case 5:
-              di0 = li; di1 = bli; di2 = bi;
-              li0 = id; li1 = ti; li2 = ri; l4 = false;
+              di0 = li;
+              di1 = bli;
+              di2 = bi;
+              li0 = id;
+              li1 = ti;
+              li2 = ri;
+              l4 = false;
               break;
             case 6:
-              di0 = tli; di1 = li; di2 = bli;
-              li0 = id; li1 = tri; li2 = ri; li3 = bri; l4 = true;
+              di0 = tli;
+              di1 = li;
+              di2 = bli;
+              li0 = id;
+              li1 = tri;
+              li2 = ri;
+              li3 = bri;
+              l4 = true;
               break;
             case 7:
-              di0 = tli; di1 = ti; di2 = li;
-              li0 = id; li1 = bi; li2 = ri; l4 = false;
+              di0 = tli;
+              di1 = ti;
+              di2 = li;
+              li0 = id;
+              li1 = bi;
+              li2 = ri;
+              l4 = false;
               break;
           }
 
@@ -409,15 +582,28 @@ class Anime4KUpscaler {
 
         // Sobel 算子
         final int xSobel =
-            (-topLeft + topRight - left - left + right + right - bottomLeft +
+            (-topLeft +
+                    topRight -
+                    left -
+                    left +
+                    right +
+                    right -
+                    bottomLeft +
                     bottomRight)
                 .abs();
         final int ySobel =
-            (-topLeft - top - top - topRight + bottomLeft + bottom + bottom +
+            (-topLeft -
+                    top -
+                    top -
+                    topRight +
+                    bottomLeft +
+                    bottom +
+                    bottom +
                     bottomRight)
                 .abs();
 
-        final int deriv = math.sqrt(xSobel * xSobel + ySobel * ySobel)
+        final int deriv = math
+            .sqrt(xSobel * xSobel + ySobel * ySobel)
             .round()
             .clamp(0, 255);
 
@@ -467,36 +653,80 @@ class Anime4KUpscaler {
 
           switch (k) {
             case 0:
-              di0 = tli; di1 = ti; di2 = tri;
-              lvi0 = id; lvi1 = bli; lvi2 = bi; lvi3 = bri; l4 = true;
+              di0 = tli;
+              di1 = ti;
+              di2 = tri;
+              lvi0 = id;
+              lvi1 = bli;
+              lvi2 = bi;
+              lvi3 = bri;
+              l4 = true;
               break;
             case 1:
-              di0 = ti; di1 = tri; di2 = ri;
-              lvi0 = id; lvi1 = li; lvi2 = bi; l4 = false;
+              di0 = ti;
+              di1 = tri;
+              di2 = ri;
+              lvi0 = id;
+              lvi1 = li;
+              lvi2 = bi;
+              l4 = false;
               break;
             case 2:
-              di0 = tri; di1 = ri; di2 = bri;
-              lvi0 = id; lvi1 = tli; lvi2 = li; lvi3 = bli; l4 = true;
+              di0 = tri;
+              di1 = ri;
+              di2 = bri;
+              lvi0 = id;
+              lvi1 = tli;
+              lvi2 = li;
+              lvi3 = bli;
+              l4 = true;
               break;
             case 3:
-              di0 = ri; di1 = bri; di2 = bi;
-              lvi0 = id; lvi1 = ti; lvi2 = li; l4 = false;
+              di0 = ri;
+              di1 = bri;
+              di2 = bi;
+              lvi0 = id;
+              lvi1 = ti;
+              lvi2 = li;
+              l4 = false;
               break;
             case 4:
-              di0 = bli; di1 = bi; di2 = bri;
-              lvi0 = id; lvi1 = tli; lvi2 = ti; lvi3 = tri; l4 = true;
+              di0 = bli;
+              di1 = bi;
+              di2 = bri;
+              lvi0 = id;
+              lvi1 = tli;
+              lvi2 = ti;
+              lvi3 = tri;
+              l4 = true;
               break;
             case 5:
-              di0 = li; di1 = bli; di2 = bi;
-              lvi0 = id; lvi1 = ti; lvi2 = ri; l4 = false;
+              di0 = li;
+              di1 = bli;
+              di2 = bi;
+              lvi0 = id;
+              lvi1 = ti;
+              lvi2 = ri;
+              l4 = false;
               break;
             case 6:
-              di0 = tli; di1 = li; di2 = bli;
-              lvi0 = id; lvi1 = tri; lvi2 = ri; lvi3 = bri; l4 = true;
+              di0 = tli;
+              di1 = li;
+              di2 = bli;
+              lvi0 = id;
+              lvi1 = tri;
+              lvi2 = ri;
+              lvi3 = bri;
+              l4 = true;
               break;
             case 7:
-              di0 = tli; di1 = ti; di2 = li;
-              lvi0 = id; lvi1 = bi; lvi2 = ri; l4 = false;
+              di0 = tli;
+              di1 = ti;
+              di2 = li;
+              lvi0 = id;
+              lvi1 = bi;
+              lvi2 = ri;
+              l4 = false;
               break;
           }
 
@@ -558,8 +788,7 @@ class Anime4KUpscaler {
   }
 
   /// 比较3个暗像素是否都小于3个亮像素
-  static bool _compareLum3(
-      int d0, int d1, int d2, int l0, int l1, int l2) {
+  static bool _compareLum3(int d0, int d1, int d2, int l0, int l1, int l2) {
     return d0 < l0 &&
         d0 < l1 &&
         d0 < l2 &&
@@ -573,7 +802,14 @@ class Anime4KUpscaler {
 
   /// 比较3个暗像素是否都小于4个亮像素
   static bool _compareLum4(
-      int d0, int d1, int d2, int l0, int l1, int l2, int l3) {
+    int d0,
+    int d1,
+    int d2,
+    int l0,
+    int l1,
+    int l2,
+    int l3,
+  ) {
     return d0 < l0 &&
         d0 < l1 &&
         d0 < l2 &&
@@ -605,12 +841,10 @@ class Anime4KUpscaler {
   }
 
   static int _weightedAverageRGB(int c0, int c1, int alpha) {
-    final int ra =
-        (_getRed(c0) * (255 - alpha) + _getRed(c1) * alpha) ~/ 255;
+    final int ra = (_getRed(c0) * (255 - alpha) + _getRed(c1) * alpha) ~/ 255;
     final int ga =
         (_getGreen(c0) * (255 - alpha) + _getGreen(c1) * alpha) ~/ 255;
-    final int ba =
-        (_getBlue(c0) * (255 - alpha) + _getBlue(c1) * alpha) ~/ 255;
+    final int ba = (_getBlue(c0) * (255 - alpha) + _getBlue(c1) * alpha) ~/ 255;
     final int aa =
         (_getAlpha(c0) * (255 - alpha) + _getAlpha(c1) * alpha) ~/ 255;
     return _toARGB(aa, ra, ga, ba);
@@ -629,5 +863,19 @@ class Anime4KParams {
     this.pushStrength = 0.31,
     this.pushGradStrength = 1.0,
     this.scaleFactor = 2.0,
+  });
+}
+
+class Anime4KRenderParams {
+  final Uint8List imageBytes;
+  final Uint8List? enhancedBytes;
+  final double scaleFactor;
+  final double strength;
+
+  const Anime4KRenderParams({
+    required this.imageBytes,
+    this.enhancedBytes,
+    required this.scaleFactor,
+    required this.strength,
   });
 }

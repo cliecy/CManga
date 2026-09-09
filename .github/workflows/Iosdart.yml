@@ -20,6 +20,9 @@ jobs:
           
       - name: Install dependencies
         run: flutter pub get
+
+      - name: Build iOS simulator native integration
+        run: flutter build ios --simulator --debug
         
       - name: Build iOS (No Signing)
         run: flutter build ios --release --no-codesign
@@ -36,3 +39,4 @@ jobs:
         with:
           name: app-release-ios-ipa
           path: build/Venera-iOS-NoCodesign.ipa
+          if-no-files-found: error

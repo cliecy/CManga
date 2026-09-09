@@ -7,36 +7,99 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2022
+    env:
+      VENERA_AI_DOWNLOAD_CACHE: ${{ github.workspace }}/build/ai-downloads
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.41.2'
           channel: 'stable'
           cache: true
-          
+
+      - name: Cache checksum-verified AI archives
+        uses: actions/cache@v4
+        with:
+          path: build/ai-downloads
+          key: windows-ai-ort1.22.0-dml1.15.4-opencv4.11.0-v1
+
       - name: Install dependencies
         run: flutter pub get
-        
-      - name: Enable Windows support
-        run: flutter config --enable-windows-desktop
-        
-      - name: Build Windows
+
+      - name: Build Windows x64
         run: flutter build windows --release
-        
+
+      - name: Check bundled DLLs and architecture
+        run: python windows/build.py --arch x64 --verify-only
+
+      - name: Build real-model smoke executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake --build build/windows/x64 --config Release --target venera_image_ai_smoke --parallel 2
+          if ($LASTEXITCODE -ne 0) { throw 'Native smoke build failed' }
+
+      - name: Exercise ACNet CPU and missing DirectML
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName System.Drawing
+          $image = New-Object System.Drawing.Bitmap 19, 13
+          for ($y = 0; $y -lt 13; $y++) {
+            for ($x = 0; $x -lt 19; $x++) {
+              $value = if (([math]::Floor($x / 3) + [math]::Floor($y / 3)) % 2 -eq 0) { 0 } else { 255 }
+              $image.SetPixel($x, $y, [System.Drawing.Color]::FromArgb(255, $value, $value, $value))
+            }
+          }
+          New-Item -ItemType Directory -Force build/ai-smoke-results | Out-Null
+          $image.Save("$pwd/build/ai-smoke-results/input.png", [System.Drawing.Imaging.ImageFormat]::Png)
+          $image.Dispose()
+          $smoke = Resolve-Path build/windows/x64/Release/venera_image_ai_smoke.exe
+          $arguments = @('--model', 'assets/models/anime4k_acnet.onnx', '--image', 'build/ai-smoke-results/input.png', '--type', 'esrgan', '--backend', 'cpu', '--scale', '1.3', '--strength', '1', '--intensity', '1')
+          & $smoke @arguments --output build/ai-smoke-results/cpu.png --renders 3 --check-strength true | Tee-Object build/ai-smoke-results/cpu.jsonl
+          if ($LASTEXITCODE -ne 0) { throw 'ACNet CPU inference failed' }
+          $results = @(Get-Content build/ai-smoke-results/cpu.jsonl | ForEach-Object { $_ | ConvertFrom-Json })
+          if ($results.Count -ne 3 -or $results[0].backend -ne 'cpu' -or $results[0].inferenceRuns -lt 1) { throw 'Smoke did not execute the CPU model' }
+          foreach ($render in $results[1..2]) {
+            if (-not $render.cacheHit -or $render.inferenceRuns -ne 0) { throw 'Render parameters caused repeated inference' }
+          }
+          $output = [System.Drawing.Image]::FromFile("$pwd/build/ai-smoke-results/cpu.png")
+          if ($output.Width -ne 25 -or $output.Height -ne 17) { throw 'Fractional SR dimensions are wrong' }
+          $output.Dispose()
+          $dml = Join-Path (Split-Path $smoke) 'image_ai/directml'
+          Move-Item $dml "$dml.disabled"
+          try {
+            & $smoke @arguments --backend auto --output build/ai-smoke-results/no-directml.png | Tee-Object build/ai-smoke-results/no-directml.jsonl
+            if ($LASTEXITCODE -ne 0) { throw 'CPU cannot launch without optional DirectML' }
+            $withoutDml = Get-Content build/ai-smoke-results/no-directml.jsonl | ConvertFrom-Json
+            if ($withoutDml.backend -ne 'cpu' -or $withoutDml.inferenceRuns -lt 1 -or [string]::IsNullOrWhiteSpace($withoutDml.fallbackReason)) { throw 'Missing-DML smoke did not report CPU fallback' }
+          } finally {
+            Move-Item "$dml.disabled" $dml
+          }
+          Get-FileHash assets/models/anime4k_acnet.onnx, build/ai-smoke-results/input.png -Algorithm SHA256 | Format-List | Out-File build/ai-smoke-results/hashes.txt
+
+      - name: Upload CPU smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-CPU-AI-smoke
+          path: build/ai-smoke-results/
+          if-no-files-found: warn
+
       - name: Package Windows Build
         shell: pwsh
         run: |
-          $VERSION = (Get-Content pubspec.yaml | Select-String "version: ").ToString().Split(" ")[1].Split("+")[0]
+          $ErrorActionPreference = 'Stop'
+          $VERSION = (Get-Content pubspec.yaml | Select-String '^version: ').ToString().Split(' ')[1].Split('+')[0]
           $ARCHIVE_NAME = "Venera-Windows-v$VERSION.zip"
           Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath $ARCHIVE_NAME
-          echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $env:GITHUB_ENV
+          "ARCHIVE_NAME=$ARCHIVE_NAME" >> $env:GITHUB_ENV
 
       - name: Upload Windows Build
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARCHIVE_NAME }}
-          path: "*.zip"
+          path: ${{ env.ARCHIVE_NAME }}

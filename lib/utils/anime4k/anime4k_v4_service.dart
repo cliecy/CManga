@@ -1,274 +1,132 @@
-import 'dart:async';
-import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:flutter/services.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:path/path.dart' as path;
-import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
-import 'package:venera/foundation/log.dart';
+import 'package:venera/utils/image_ai_service.dart';
 
 import 'anime4k_v4_model_manager.dart';
 
-/// Anime4K v4 超分服务（带模型版本）
-///
-/// 基于 Anime4K v4 超分 ONNX 模型（默认官方 ACNet 2×，可选 Real-ESRGAN 4× / 通用 2×），经原生
-/// （Kotlin + ONNX Runtime + NNAPI GPU）完成超分辨率，倍数由模型实际维度决定。
-/// 设计严格对齐 [ColorizationService]：
-///  - 单例 + 缓存 + 任务队列；
-///  - 通过 [com.github.kiastr.venera_ssr/colorize] MethodChannel 调用，
-///    与原生 [ColorizeEngine.colorizeEsrgan] 对接（复用上色通道，无需新增原生方法）；
-///  - 推理在原生后台线程执行，失败自动从 NNAPI 回退 CPU。
-///
-/// 与 v1（纯 Dart CPU 算法）并存：reader 侧按 `anime4KVersion` 选择引擎；
-/// v4 仅 Android 生效（NNAPI/ONNX Runtime 为 Android 原生实现），非 Android 时
-/// [isAvailable] 为 false，reader 自动回退 v1。
+/// AI super-resolution using the same real models on all supported native platforms.
+/// Failure preserves the reader image; it never silently selects v1.
 class Anime4KV4Service {
   Anime4KV4Service._internal();
-
-  static final Anime4KV4Service _instance = Anime4KV4Service._internal();
-
+  static final _instance = Anime4KV4Service._internal();
   factory Anime4KV4Service() => _instance;
-
   static Anime4KV4Service get instance => _instance;
 
-  /// 与原生端通信的 MethodChannel（复用上色通道）
-  static const MethodChannel _channel =
-      MethodChannel('com.github.kiastr.venera_ssr/colorize');
-
-  String? _cacheDir;
+  final _ai = ImageAiService.instance;
   String? _modelPath;
+  Map<String, dynamic>? _modelInfo;
+  Map<String, dynamic>? get modelInfo => _modelInfo;
+  int? get modelScale => _modelInfo?['scale'] as int?;
+  bool get isAvailable =>
+      _ai.isSupported && _modelPath != null && _modelInfo != null;
 
-  final Set<String> _processingKeys = {};
-  static const int _maxConcurrentTasks = 2;
-  int _runningTasks = 0;
-  final List<Function> _taskQueue = [];
-
-  /// 初始化缓存目录并探测模型（不自动下载）
   Future<void> init() async {
-    try {
-      final dir = await getTemporaryDirectory();
-      _cacheDir = path.join(dir.path, 'anime4k_v4_cache');
-      final cacheDirectory = Directory(_cacheDir!);
-      if (!await cacheDirectory.exists()) {
-        await cacheDirectory.create(recursive: true);
-      }
-      // 同步“当前选中模型”（默认 ACNet 2x），再抽取内置模型/确认可用
-      await Anime4KV4ModelManager.setSelectedModelId(
-        (appdata.settings['anime4KV4Model'] as String?) ?? 'anime4k_acnet',
-      );
-      await Anime4KV4ModelManager.extractBundledModelIfNeeded();
-      _modelPath = await Anime4KV4ModelManager.ensureModelAvailable();
-    } catch (e) {
-      Log.error('Anime4KV4', 'init error: $e');
+    if (!await _ai.init()) return;
+    final id = Anime4KV4ModelManager.migrateModelId(
+      appdata.settings['anime4KV4Model'] as String? ?? 'anime4k_acnet',
+    );
+    if (appdata.settings['anime4KV4Model'] != id) {
+      appdata.settings['anime4KV4Model'] = id;
+      await appdata.saveData();
     }
+    await Anime4KV4ModelManager.setSelectedModelId(id);
+    await Anime4KV4ModelManager.extractBundledModelIfNeeded();
+    await checkModelAvailable();
   }
 
-  /// 切换 v4 超分模型（4x/2x）。重置原生会话、重载模型路径、清空超分缓存
-  /// （不同倍数输出尺寸不同，缓存不可复用）。
   Future<void> setModel(String id) async {
+    id = Anime4KV4ModelManager.migrateModelId(id);
     if (!Anime4KV4ModelManager.isValidModelId(id)) return;
+    _modelInfo = null;
+    _modelPath = null;
     await Anime4KV4ModelManager.setSelectedModelId(id);
     appdata.settings['anime4KV4Model'] = id;
     appdata.saveData();
     await resetNativeSession();
     await Anime4KV4ModelManager.extractBundledModelIfNeeded();
-    _modelPath = await Anime4KV4ModelManager.ensureModelAvailable();
-    await clearCache();
+    await checkModelAvailable();
   }
-
-  /// 模型是否可用（已下载到本地且当前平台支持）
-  bool get isAvailable =>
-      App.isAndroid && _modelPath != null;
 
   Future<bool> checkModelAvailable() async {
-    if (_modelPath != null) {
-      if (await File(_modelPath!).exists()) return true;
-      _modelPath = null;
-    }
-    _modelPath = await Anime4KV4ModelManager.ensureModelAvailable();
-    return _modelPath != null;
-  }
-
-  String? _getCachePath(String key) {
-    if (_cacheDir == null) return null;
-    return path.join(_cacheDir!, '${key.hashCode.abs()}.png');
-  }
-
-  Future<Uint8List?> _getFromCache(String key) async {
-    final cachePath = _getCachePath(key);
-    if (cachePath == null) return null;
-    final file = File(cachePath);
-    if (await file.exists()) {
-      try {
-        return await file.readAsBytes();
-      } catch (e) {
-        return null;
+    _modelInfo = null;
+    _modelPath = null;
+    try {
+      if (!await _ai.init()) return false;
+      final modelPath = await Anime4KV4ModelManager.ensureModelAvailable();
+      if (modelPath == null) {
+        _ai.reportError('Super-resolution model is not installed');
+        return false;
       }
-    }
-    return null;
-  }
-
-  Future<void> _saveToCache(String key, Uint8List data) async {
-    final cachePath = _getCachePath(key);
-    if (cachePath == null) return;
-    try {
-      final file = File(cachePath);
-      await file.writeAsBytes(data);
-    } catch (e) {
-      Log.error('Anime4KV4', 'cache save error: $e');
+      final info = await _ai.getModelInfo(modelPath, 'esrgan');
+      _modelPath = modelPath;
+      _modelInfo = info;
+      return true;
+    } catch (error) {
+      _ai.reportError(error, operation: 'Super-resolution model unavailable');
+      return false;
     }
   }
 
-  /// 调用原生端完成超分推理（type='esrgan'）。
-  /// 优先 NNAPI（GPU），失败自动回退纯 CPU；任何失败返回 null（不抛异常）。
-  Future<Uint8List?> _upscaleOnNative(
-    Uint8List imageBytes,
-    String modelPath,
-    double intensity,
-    bool useNnapi,
-  ) async {
-    try {
-      final result = await _channel.invokeMethod<Uint8List>('colorize', {
-        'imageBytes': imageBytes,
-        'modelPath': modelPath,
-        'type': 'esrgan',
-        'useNnapi': useNnapi,
-        'intensity': intensity,
-      });
-      return result;
-    } catch (e, s) {
-      Log.error('Anime4KV4', 'native upscale failed (useNnapi=$useNnapi): $e\n$s');
-      return null;
-    }
-  }
-
-  /// 丢弃原生端已缓存的 ONNX 会话（模型变更/导入/删除后必须调用）
   Future<void> resetNativeSession() async {
-    try {
-      await _channel.invokeMethod<void>('resetSession');
-    } catch (e, s) {
-      Log.error('Anime4KV4', 'resetNativeSession failed: $e\n$s');
-    }
+    _modelInfo = null;
+    _modelPath = null;
+    await _ai.resetSession();
   }
 
-  /// 处理图片字节数据，返回超分后的 PNG 字节数据（倍数由模型决定，2x/4x）。
-  ///
-  /// 模型缺失或非 Android 时直接返回 null（上层据此回退 v1 或保持原图）。
   Future<Uint8List?> processImage({
     required Uint8List imageBytes,
     required String cacheKey,
     double intensity = 1.0,
+    double outputScale = 0.0,
+    double strength = 1.0,
+    String backend = 'auto',
+    void Function(ImageAiStatus)? onStatus,
   }) async {
-    if (!App.isAndroid) {
-      // v4 依赖 Android 原生 ONNX Runtime，非 Android 不处理（reader 自动回退 v1）
+    var reportedFailure = false;
+    try {
+      if (!await _ai.init()) {
+        throw UnsupportedError(
+          _ai.capabilities['reason']?.toString() ?? 'AI backend unavailable',
+        );
+      }
+      final model = Anime4KV4ModelManager.selectedDef;
+      final modelPath = await Anime4KV4ModelManager.ensureModelAvailable(
+        model: model,
+      );
+      if (modelPath == null) {
+        throw StateError('Super-resolution model is not installed');
+      }
+      final info = await _ai.getModelInfo(modelPath, 'esrgan');
+      _modelPath = modelPath;
+      _modelInfo = info;
+      final result = await _ai.process(
+        {
+          'imageBytes': imageBytes,
+          'modelPath': modelPath,
+          'type': 'esrgan',
+          'backend': backend,
+          'intensity': intensity,
+          'strength': strength,
+          'outputScale': outputScale,
+        },
+        onStatus: (value) {
+          reportedFailure = value.isError;
+          onStatus?.call(value);
+        },
+      );
+      return result['imageBytes'] as Uint8List;
+    } catch (error) {
+      if (reportedFailure) return null;
+      _ai.reportError(
+        error,
+        operation: 'Super-resolution failed; page not enhanced',
+      );
+      onStatus?.call(_ai.status.value);
       return null;
     }
-    if (_modelPath == null) {
-      if (!await checkModelAvailable()) {
-        Log.warning('Anime4KV4', 'Model not available, skipping for $cacheKey');
-        return null;
-      }
-    }
-    final modelPath = _modelPath;
-    if (modelPath == null) return null;
-
-    // 前缀含模型 id（4x/2x 输出尺寸不同）+ intensity，避免串图与旧缓存复用
-    final fullKey =
-        'v4_${Anime4KV4ModelManager.selectedDef.id}_${cacheKey}_${intensity.toStringAsFixed(2)}';
-
-    final cached = await _getFromCache(fullKey);
-    if (cached != null) {
-      Log.info('Anime4KV4', 'cache hit for $cacheKey');
-      return cached;
-    }
-
-    if (_processingKeys.contains(fullKey)) {
-      Log.info('Anime4KV4', 'already processing $cacheKey');
-      return null;
-    }
-
-    _processingKeys.add(fullKey);
-
-    return _enqueueTask(() async {
-      try {
-        Log.info('Anime4KV4', 'processing image $cacheKey');
-
-        var result = await _upscaleOnNative(imageBytes, modelPath, intensity, true);
-        // NNAPI 失败（不支持/崩溃）时回退纯 CPU 重试一次
-        if (result == null) {
-          Log.warning('Anime4KV4', 'NNAPI failed, retry with CPU for $cacheKey');
-          result = await _upscaleOnNative(imageBytes, modelPath, intensity, false);
-        }
-
-        if (result != null) {
-          await _saveToCache(fullKey, result);
-          Log.info('Anime4KV4', 'processing complete for $cacheKey');
-        }
-        return result;
-      } catch (e, s) {
-        Log.error('Anime4KV4', 'processing error: $e\n$s');
-        return null;
-      } finally {
-        _processingKeys.remove(fullKey);
-      }
-    });
   }
 
-  Future<T?> _enqueueTask<T>(Future<T?> Function() task) async {
-    final completer = Completer<T?>();
-    _taskQueue.add(() async {
-      _runningTasks++;
-      try {
-        final result = await task();
-        completer.complete(result);
-      } catch (e) {
-        completer.completeError(e);
-      } finally {
-        _runningTasks--;
-        _nextTask();
-      }
-    });
-    _nextTask();
-    return completer.future;
-  }
-
-  void _nextTask() {
-    if (_runningTasks < _maxConcurrentTasks && _taskQueue.isNotEmpty) {
-      final task = _taskQueue.removeAt(0);
-      task();
-    }
-  }
-
-  Future<void> clearCache() async {
-    if (_cacheDir == null) return;
-    try {
-      final dir = Directory(_cacheDir!);
-      if (await dir.exists()) {
-        await dir.delete(recursive: true);
-        await dir.create(recursive: true);
-      }
-      Log.info('Anime4KV4', 'cache cleared');
-    } catch (e) {
-      Log.error('Anime4KV4', 'cache clear error: $e');
-    }
-  }
-
-  Future<int> getCacheSize() async {
-    if (_cacheDir == null) return 0;
-    try {
-      final dir = Directory(_cacheDir!);
-      if (!await dir.exists()) return 0;
-      int totalSize = 0;
-      await for (final entity in dir.list(recursive: true)) {
-        if (entity is File) {
-          totalSize += await entity.length();
-        }
-      }
-      return totalSize;
-    } catch (e) {
-      return 0;
-    }
-  }
+  Future<void> clearCache() => _ai.clearRenderedCache('esrgan');
+  Future<int> getCacheSize() => _ai.cacheSize('esrgan');
 }

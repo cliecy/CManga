@@ -1,0 +1,168 @@
+PODS:
+  - app_links (0.0.2):
+    - Flutter
+  - battery_plus (1.0.0):
+    - Flutter
+  - file_selector_ios (0.0.1):
+    - Flutter
+  - Flutter (1.0.0)
+  - flutter_7zip (0.0.1):
+    - Flutter
+  - flutter_file_dialog (0.0.1):
+    - Flutter
+  - flutter_inappwebview_ios (0.0.1):
+    - Flutter
+    - flutter_inappwebview_ios/Core (= 0.0.1)
+    - OrderedSet (~> 6.0.3)
+  - flutter_inappwebview_ios/Core (0.0.1):
+    - Flutter
+    - OrderedSet (~> 6.0.3)
+  - flutter_memory_info (0.0.1):
+    - Flutter
+  - flutter_qjs (0.0.1):
+    - Flutter
+  - local_auth_darwin (0.0.1):
+    - Flutter
+    - FlutterMacOS
+  - lodepng_flutter (0.0.1):
+    - Flutter
+  - onnxruntime-c (1.22.0)
+  - OrderedSet (6.0.3)
+  - path_provider_foundation (0.0.1):
+    - Flutter
+    - FlutterMacOS
+  - rhttp (0.0.1):
+    - Flutter
+  - share_plus (0.0.1):
+    - Flutter
+  - shared_preferences_foundation (0.0.1):
+    - Flutter
+    - FlutterMacOS
+  - sqlite3 (3.49.2):
+    - sqlite3/common (= 3.49.2)
+  - sqlite3/common (3.49.2)
+  - sqlite3/dbstatvtab (3.49.2):
+    - sqlite3/common
+  - sqlite3/fts5 (3.49.2):
+    - sqlite3/common
+  - sqlite3/perf-threadsafe (3.49.2):
+    - sqlite3/common
+  - sqlite3/rtree (3.49.2):
+    - sqlite3/common
+  - sqlite3_flutter_libs (0.0.1):
+    - Flutter
+    - FlutterMacOS
+    - sqlite3 (~> 3.49.0)
+    - sqlite3/dbstatvtab
+    - sqlite3/fts5
+    - sqlite3/perf-threadsafe
+    - sqlite3/rtree
+  - url_launcher_ios (0.0.1):
+    - Flutter
+  - VeneraImageAI (1.0.0):
+    - Flutter
+    - FlutterMacOS
+    - onnxruntime-c (= 1.22.0)
+    - VeneraOpenCV (= 4.11.0)
+  - VeneraOpenCV (4.11.0)
+  - zip_flutter (0.0.1):
+    - Flutter
+
+DEPENDENCIES:
+  - app_links (from `.symlinks/plugins/app_links/ios`)
+  - battery_plus (from `.symlinks/plugins/battery_plus/ios`)
+  - file_selector_ios (from `.symlinks/plugins/file_selector_ios/ios`)
+  - Flutter (from `Flutter`)
+  - flutter_7zip (from `.symlinks/plugins/flutter_7zip/ios`)
+  - flutter_file_dialog (from `.symlinks/plugins/flutter_file_dialog/ios`)
+  - flutter_inappwebview_ios (from `.symlinks/plugins/flutter_inappwebview_ios/ios`)
+  - flutter_memory_info (from `.symlinks/plugins/flutter_memory_info/ios`)
+  - flutter_qjs (from `.symlinks/plugins/flutter_qjs/ios`)
+  - local_auth_darwin (from `.symlinks/plugins/local_auth_darwin/darwin`)
+  - lodepng_flutter (from `.symlinks/plugins/lodepng_flutter/ios`)
+  - path_provider_foundation (from `.symlinks/plugins/path_provider_foundation/darwin`)
+  - rhttp (from `.symlinks/plugins/rhttp/ios`)
+  - share_plus (from `.symlinks/plugins/share_plus/ios`)
+  - shared_preferences_foundation (from `.symlinks/plugins/shared_preferences_foundation/darwin`)
+  - sqlite3_flutter_libs (from `.symlinks/plugins/sqlite3_flutter_libs/darwin`)
+  - url_launcher_ios (from `.symlinks/plugins/url_launcher_ios/ios`)
+  - VeneraImageAI (from `../native`)
+  - VeneraOpenCV (from `../native/VeneraOpenCV.podspec`)
+  - zip_flutter (from `.symlinks/plugins/zip_flutter/ios`)
+
+SPEC REPOS:
+  trunk:
+    - onnxruntime-c
+    - OrderedSet
+    - sqlite3
+
+EXTERNAL SOURCES:
+  app_links:
+    :path: ".symlinks/plugins/app_links/ios"
+  battery_plus:
+    :path: ".symlinks/plugins/battery_plus/ios"
+  file_selector_ios:
+    :path: ".symlinks/plugins/file_selector_ios/ios"
+  Flutter:
+    :path: Flutter
+  flutter_7zip:
+    :path: ".symlinks/plugins/flutter_7zip/ios"
+  flutter_file_dialog:
+    :path: ".symlinks/plugins/flutter_file_dialog/ios"
+  flutter_inappwebview_ios:
+    :path: ".symlinks/plugins/flutter_inappwebview_ios/ios"
+  flutter_memory_info:
+    :path: ".symlinks/plugins/flutter_memory_info/ios"
+  flutter_qjs:
+    :path: ".symlinks/plugins/flutter_qjs/ios"
+  local_auth_darwin:
+    :path: ".symlinks/plugins/local_auth_darwin/darwin"
+  lodepng_flutter:
+    :path: ".symlinks/plugins/lodepng_flutter/ios"
+  path_provider_foundation:
+    :path: ".symlinks/plugins/path_provider_foundation/darwin"
+  rhttp:
+    :path: ".symlinks/plugins/rhttp/ios"
+  share_plus:
+    :path: ".symlinks/plugins/share_plus/ios"
+  shared_preferences_foundation:
+    :path: ".symlinks/plugins/shared_preferences_foundation/darwin"
+  sqlite3_flutter_libs:
+    :path: ".symlinks/plugins/sqlite3_flutter_libs/darwin"
+  url_launcher_ios:
+    :path: ".symlinks/plugins/url_launcher_ios/ios"
+  VeneraImageAI:
+    :path: "../native"
+  VeneraOpenCV:
+    :podspec: "../native/VeneraOpenCV.podspec"
+  zip_flutter:
+    :path: ".symlinks/plugins/zip_flutter/ios"
+
+SPEC CHECKSUMS:
+  app_links: 76b66b60cc809390ca1ad69bfd66b998d2387ac7
+  battery_plus: b42253f6d2dde71712f8c36fef456d99121c5977
+  file_selector_ios: ec57ec07954363dd730b642e765e58f199bb621a
+  Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
+  flutter_7zip: e34b46b824f4f7dc3501ecd11a962a1e3f37fbe5
+  flutter_file_dialog: ca8d7fbd1772d4f0c2777b4ab20a7787ef4e7dd8
+  flutter_inappwebview_ios: b89ba3482b96fb25e00c967aae065701b66e9b99
+  flutter_memory_info: ba0a8aa54cfbae8972fd65b014737e063cd75217
+  flutter_qjs: 25bb018feca5a6c80396f1ab1a27f7724892e89e
+  local_auth_darwin: 553ce4f9b16d3fdfeafce9cf042e7c9f77c1c391
+  lodepng_flutter: 89b9ed92ebfc450d86387d76068e9a20ab6fc3a7
+  onnxruntime-c: 7f778680e96145956c0a31945f260321eed2611a
+  OrderedSet: e539b66b644ff081c73a262d24ad552a69be3a94
+  path_provider_foundation: 080d55be775b7414fd5a5ef3ac137b97b097e564
+  rhttp: 359daed992674fc912552df3106bfbc746bcc929
+  share_plus: 50da8cb520a8f0f65671c6c6a99b3617ed10a58a
+  shared_preferences_foundation: 7036424c3d8ec98dfe75ff1667cb0cd531ec82bb
+  sqlite3: 3c950dc86011117c307eb0b28c4a7bb449dce9f1
+  sqlite3_flutter_libs: 3c323550ef3b928bc0aa9513c841e45a7d242832
+  url_launcher_ios: 694010445543906933d732453a59da0a173ae33d
+  VeneraImageAI: 02fe51dabaae4a9e6139ac849b69eea02dfec186
+  VeneraOpenCV: 955dd73325b65851dca44f5ddf3be2d0d52513a0
+  zip_flutter: 452447e26d7e66c88fc582ad7ad86fcee39c7b53
+
+PODFILE CHECKSUM: 5493e47901707ac15eb44fe7bd810af8db33585d
+
+COCOAPODS: 1.17.0

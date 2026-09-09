@@ -1,303 +1,466 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:venera/foundation/log.dart';
+import 'package:venera/utils/image_ai_service.dart';
+import 'package:venera/utils/model_download.dart';
 
-/// 模型管理器：负责从网络下载 DeOldify / DDColor 模型到应用目录。
-///
-/// 不使用 Flutter assets 打包模型（模型文件 ~243MB 会导致 Android APK 构建失败），
-/// 改为在设置页由用户手动触发下载，避免首次启动即下载大文件。
-///
-/// 实际的推理已移至原生端（Kotlin + OpenCV + ONNX Runtime），
-/// 见 android/app/src/main/kotlin/com/github/kiastr/venera_ssr/colorize/，
-/// 通过 MethodChannel 调用。本文件只负责模型的下载与本地路径解析。
-///
-/// 模型调用位置（Model Invocation Location）：
-///   [getApplicationSupportDirectory]/deoldify_artistic.onnx
-/// 即 ColorizationService 通过 [ensureModelAvailable] 取得、原生 ColorizeEngine 经
-/// createSession(modelPath) 直接读取的路径。无论是下载模型、int8 变体还是用户自选的
-/// 外部模型，最终都落盘到这一位置——彻底消除“自定义路径 + shared_prefs 间接层”带来的
-/// 异常与崩溃。
+/// A model's explicit native pipeline, installation and publishing provenance.
+class ColorizationModelVariant {
+  final String id;
+  final String label;
+  final String type;
+  final String fileName;
+  final int? sizeBytes;
+  final List<String> defaultUrls;
+  final String sourceUrl;
+  final String licenseNote;
+  final String protocolNote;
+  final String? sha256Digest;
+  final bool requiresNonCommercialConsent;
+
+  const ColorizationModelVariant({
+    required this.id,
+    required this.label,
+    required this.type,
+    required this.fileName,
+    required this.defaultUrls,
+    required this.sourceUrl,
+    required this.licenseNote,
+    required this.protocolNote,
+    this.sizeBytes,
+    this.sha256Digest,
+    this.requiresNonCommercialConsent = false,
+  });
+
+  bool get canDownload => defaultUrls.isNotEmpty;
+}
+
+/// Models are streamed at runtime, validated with their native pipeline, and
+/// installed independently. No large weights are included in Flutter assets.
 class ColorizationModelManager {
-  static const modelFileName = 'deoldify_artistic.onnx';
-  static const expectedFileSize = 243 * 1024 * 1024; // ~243MB（DeOldify 完整版）
-
-  /// 判定一个 onnx 是否为有效模型的最小体积（8MB）。
-  /// DeOldify 完整版 ~243MB，DDColor int8 轻量版 ~60MB，二者都满足；
-  /// 用统一下限避免把 int8 轻量模型误判为“未下载”。
-  static const int _validModelMinSize = 8 * 1024 * 1024;
-
-  /// 默认镜像源（DeOldify，按稳定性排序），用户可在设置页增删
-  static const String _modelUrlsKey = 'colorization_model_urls';
-
-  /// 是否正在使用“自选外部模型”（落盘到模型调用位置，覆盖下载模型）
-  static const String _customModelActiveKey = 'colorization_custom_model_active';
-
-  /// 自选外部模型的原始文件名（仅用于 UI 展示）
-  static const String _customModelNameKey = 'colorization_custom_model_name';
-
-  /// 当前选中的模型变体：'deoldify' | 'deoldify-int8'
-  static const String _variantKey = 'colorization_model_variant';
-
-  static const List<String> _defaultModelUrls = [
-    'https://mirror.ghproxy.com/https://github.com/instant-high/deoldify-onnx/releases/download/deoldify-onnx/deoldify.onnx',
-    'https://ghp.ci/https://github.com/instant-high/deoldify-onnx/releases/download/deoldify-onnx/deoldify.onnx',
-    'https://ghproxy.net/https://github.com/instant-high/deoldify-onnx/releases/download/deoldify-onnx/deoldify.onnx',
-    'https://github.com/instant-high/deoldify-onnx/releases/download/deoldify-onnx/deoldify.onnx',
-  ];
-
-  /// DeOldify int8 轻量版镜像（实验性功能，用户实测可直接复用现有推理逻辑，无需改动）
-  static const List<String> _int8ModelUrls = [
-    'https://ghproxy.net/https://github.com/Kiastr/AiColorize/releases/download/models/deoldify_int8.onnx',
-    'https://github.com/Kiastr/AiColorize/releases/download/models/deoldify_int8.onnx',
-  ];
-
-  /// 可选模型变体（设置页切换下载源；推理逻辑不变）
-  static const List<ColorizationModelVariant> modelVariants = [
-    ColorizationModelVariant('deoldify', 'DeOldify Artistic'),
-    ColorizationModelVariant('deoldify-int8', 'DeOldify int8 (轻量, 实验性)'),
-  ];
-
-  /// 持久化的镜像 URL 列表（用户可编辑）；首次运行初始化为默认列表
-  static List<String> _modelUrls = [];
-  static bool _urlsLoaded = false;
-
-  /// 模型调用位置的文件是否已因“自选外部模型”被覆盖
-  static bool _customModelActive = false;
-
-  /// 自选外部模型原始文件名
-  static String? _customModelName;
-
-  /// 当前选中的变体
+  static const _variantKey = 'colorization_model_variant';
+  static const _migrationKey = 'colorization_independent_models_v1';
+  static Future<void>? _initialization;
   static String _selectedVariant = 'deoldify';
+  static final ValueNotifier<ModelDownloadState?> downloadState =
+      ValueNotifier<ModelDownloadState?>(null);
+  static Future<void>? _downloadTask;
 
-  /// 获取当前生效的镜像 URL 列表（懒加载 + 持久化）
-  static Future<List<String>> getModelUrls() async {
-    if (!_urlsLoaded) {
-      final prefs = await SharedPreferences.getInstance();
-      final saved = prefs.getStringList(_modelUrlsKey);
-      _modelUrls =
-          (saved != null && saved.isNotEmpty)
-              ? List.from(saved)
-              : List.from(_defaultModelUrls);
-      _urlsLoaded = true;
-    }
-    return List.from(_modelUrls);
-  }
+  static const List<ColorizationModelVariant> modelVariants = [
+    ColorizationModelVariant(
+      id: 'deoldify',
+      label: 'DeOldify Artistic',
+      type: 'deoldify',
+      fileName: 'deoldify_artistic.onnx',
+      sizeBytes: 243 * 1024 * 1024,
+      defaultUrls: [
+        'https://mirror.ghproxy.com/https://github.com/instant-high/deoldify-onnx/releases/download/deoldify-onnx/deoldify.onnx',
+        'https://ghp.ci/https://github.com/instant-high/deoldify-onnx/releases/download/deoldify-onnx/deoldify.onnx',
+        'https://ghproxy.net/https://github.com/instant-high/deoldify-onnx/releases/download/deoldify-onnx/deoldify.onnx',
+        'https://github.com/instant-high/deoldify-onnx/releases/download/deoldify-onnx/deoldify.onnx',
+      ],
+      sourceUrl: 'https://github.com/instant-high/deoldify-onnx',
+      licenseNote:
+          'Existing DeOldify distribution; check the publisher and upstream license before redistribution.',
+      protocolNote:
+          'deoldify: float32 NCHW RGB 0..255 → RGB; original luminance and size retained.',
+    ),
+    ColorizationModelVariant(
+      id: 'deoldify-int8',
+      label: 'DeOldify int8 (轻量, 实验性)',
+      type: 'deoldify',
+      fileName: 'deoldify_int8.onnx',
+      defaultUrls: [
+        'https://ghproxy.net/https://github.com/Kiastr/AiColorize/releases/download/models/deoldify_int8.onnx',
+        'https://github.com/Kiastr/AiColorize/releases/download/models/deoldify_int8.onnx',
+      ],
+      sourceUrl: 'https://github.com/Kiastr/AiColorize/releases/tag/models',
+      licenseNote:
+          'Existing experimental int8 distribution; check the publisher and upstream license before redistribution.',
+      protocolNote:
+          'deoldify: compatible RGB input/output wrapper required; int8 describes internal quantization, not a different pipeline.',
+    ),
+    ColorizationModelVariant(
+      id: 'anime_deoldify',
+      label: 'AnimeColorDeOldify Grayscale2Color (~423 MB)',
+      type: 'anime_deoldify',
+      fileName: 'anime_grayscale2color_rgb256.onnx',
+      sizeBytes: 422934355,
+      defaultUrls: [
+        'https://github.com/cliecy/Venera-SSR/releases/download/image-ai-models-20260909/anime_grayscale2color_rgb256.onnx',
+      ],
+      sourceUrl: 'https://github.com/Dakini/AnimeColorDeOldify',
+      licenseNote:
+          'Dakini states MIT for its trained weights. ONNX converted from the original Grayscale2Color checkpoint; conversion provenance and license accompany the model release.',
+      protocolNote:
+          'anime_deoldify: fixed float32 RGB 0..255 at 256² with original normalization inside the graph. App preserves original Lab L, alpha and size; not a pixel-identical reproduction of the upstream YUV filters.',
+      sha256Digest:
+          'ca4f7bcf44775c8586e6ae2fe353cccb160a62214f37f02c6fb87525eaf62aa3',
+    ),
+    ColorizationModelVariant(
+      id: 'ddcolor',
+      label: 'DDColor Artistic (~980 MB)',
+      type: 'ddcolor',
+      fileName: 'ddcolor_artistic.onnx',
+      sizeBytes: 980103562,
+      defaultUrls: [
+        'https://huggingface.co/facefusion/models-3.0.0/resolve/728b9659bd9691bf32cbf7f61af478d94b7ba81e/ddcolor_artistic.onnx',
+        'https://github.com/facefusion/facefusion-assets/releases/download/models-3.0.0/ddcolor_artistic.onnx',
+      ],
+      sourceUrl: 'https://huggingface.co/facefusion/models-3.0.0',
+      licenseNote:
+          'DDColor by piddnad: Apache-2.0. ONNX published by FaceFusion; its aggregate repository does not declare a separate export license. Large model: high memory use.',
+      protocolNote:
+          'ddcolor: 256² neutral Lab-derived RGB 0..1 → 2-channel float Lab ab; retain original L, alpha and dimensions.',
+      sha256Digest:
+          'adad4b897990d627e139e858e8a6552c1f99e39e49e811d21e8f591803c877f1',
+    ),
+    ColorizationModelVariant(
+      id: 'manga_light',
+      label: 'Manga Light Colorizer V6 — generator only (~191 MB)',
+      type: 'manga_light',
+      fileName: 'manga_light.onnx',
+      sizeBytes: 191335312,
+      defaultUrls: [
+        'https://huggingface.co/sharky172/manga-light-colorizer/resolve/2fb022c4ce55632b7671a1df306f63984928e36a/models/v6_generator.onnx',
+      ],
+      sourceUrl: 'https://huggingface.co/sharky172/manga-light-colorizer',
+      licenseNote:
+          'CC BY-NC-SA 4.0: attribution, non-commercial use only, adaptations under the same license. Publisher: sharky172. Generator-only automatic mode; no SAM or WD14 semantic guidance.',
+      protocolNote:
+          'manga_light: 512² grayscale [-1,1], zero sam_level0 [1,256,32,32], sam_level1 [1,256,16,16] and wd14_embedding [1,1024] → RGB [-1,1]; retain original L, alpha and dimensions.',
+      sha256Digest:
+          '48284fcf0b7a606270702630f559af88eecf95bc6cdec1ff8bce8663d12b4bb6',
+      requiresNonCommercialConsent: true,
+    ),
+    ColorizationModelVariant(
+      id: 'manga_v2',
+      label: 'Manga Colorization v2 — local import (~61 MB)',
+      type: 'manga_v2',
+      fileName: 'manga_v2.onnx',
+      sizeBytes: 61650260,
+      defaultUrls: [],
+      sourceUrl: 'https://huggingface.co/Faridzar/manga-colorization-v2-onnx',
+      licenseNote:
+          'Local import only. Faridzar labels its ONNX MIT, but qweasdd/manga-colorization-v2 has no verified upstream weight license. Commercial use and redistribution are not cleared.',
+      protocolNote:
+          'manga_v2: float32 [1,5,H,W], first RGB channel 0..1 and four zero hint/mask channels → RGB 0..1. Fit long edge 512 and pad to multiples of 32; retain original L, alpha and dimensions.',
+    ),
+  ];
 
-  /// 添加一个自定义镜像 URL（去重）
-  static Future<void> addModelUrl(String url) async {
-    await getModelUrls();
-    final trimmed = url.trim();
-    if (trimmed.isEmpty || _modelUrls.contains(trimmed)) return;
-    _modelUrls.add(trimmed);
+  static ColorizationModelVariant _definition(String id) =>
+      modelVariants.firstWhere(
+        (model) => model.id == id,
+        orElse: () => throw ArgumentError('Unknown colorization model: $id'),
+      );
+
+  static String _key(String kind, ColorizationModelVariant model) =>
+      'colorization_${kind}_${model.id}';
+
+  static Future<void> _initialize() => _initialization ??= _loadSelection();
+
+  static Future<void> _loadSelection() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList(_modelUrlsKey, _modelUrls);
-  }
-
-  /// 删除指定下标的镜像 URL
-  static Future<void> removeModelUrlAt(int index) async {
-    await getModelUrls();
-    if (index < 0 || index >= _modelUrls.length) return;
-    _modelUrls.removeAt(index);
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList(_modelUrlsKey, _modelUrls);
-  }
-
-  /// 恢复默认镜像列表
-  static Future<void> resetModelUrls() async {
-    _modelUrls = List.from(_defaultModelUrls);
-    _urlsLoaded = true;
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList(_modelUrlsKey, _modelUrls);
-  }
-
-  /// 是否正在使用自选外部模型
-  static Future<bool> isCustomModelActive() async {
-    if (_customModelActive) return true;
-    final prefs = await SharedPreferences.getInstance();
-    _customModelActive = prefs.getBool(_customModelActiveKey) ?? false;
-    return _customModelActive;
-  }
-
-  /// 自选外部模型的原始文件名（无则返回 null）
-  static Future<String?> getCustomModelName() async {
-    if (_customModelName != null) return _customModelName;
-    final prefs = await SharedPreferences.getInstance();
-    _customModelName = prefs.getString(_customModelNameKey);
-    return _customModelName;
-  }
-
-  /// 回退到内置（下载）模型：删除被覆盖的模型调用位置文件，
-  /// 若存在此前备份的下载模型则还原。
-  static Future<void> clearCustomModelSelection() async {
+    final saved = prefs.getString(_variantKey) ?? 'deoldify';
+    _selectedVariant = modelVariants.any((model) => model.id == saved)
+        ? saved
+        : 'deoldify';
+    if (prefs.getBool(_migrationKey) ?? false) return;
+    // The old two variants shared a single compatible DeOldify pipeline/file.
+    // Preserve that installation and its custom backup under the saved variant.
+    final legacy = _definition(saved == 'deoldify-int8' ? saved : 'deoldify');
     final dir = await getApplicationSupportDirectory();
-    final targetPath = path.join(dir.path, modelFileName);
-    final bakPath = '$targetPath.bak';
-    final targetFile = File(targetPath);
-    if (await targetFile.exists()) {
-      await targetFile.delete();
-    }
-    if (await File(bakPath).exists()) {
-      await File(bakPath).rename(targetPath);
-    }
-    _cachedModelPath = null;
-    _customModelActive = false;
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(_customModelActiveKey, false);
-    await prefs.remove(_customModelNameKey);
-  }
-
-  /// 标记“模型调用位置的文件”为自选外部模型（写 prefs + 刷新缓存路径）。
-  /// 实际文件拷贝由调用方经原生 [ColorizationService.copyUriTo] 通道完成，
-  /// 本方法只负责记账，使 UI/服务能识别当前处于自选模型状态。
-  static Future<void> markCustomModelActive(String displayName) async {
-    final dir = await getApplicationSupportDirectory();
-    final targetPath = path.join(dir.path, modelFileName);
-    _cachedModelPath = targetPath;
-    _customModelActive = true;
-    _customModelName = displayName;
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(_customModelActiveKey, true);
-    await prefs.setString(_customModelNameKey, displayName);
-  }
-
-  /// 有效模型的最小体积（字节），供 UI 侧拷贝后做体积校验
-  static int get validModelMinSize => _validModelMinSize;
-
-  static String? _cachedModelPath;
-  static bool _isDownloading = false;
-  static double _downloadProgress = 0.0;
-  static String? _currentStatus;
-
-  /// 获取模型文件路径（即模型调用位置）。
-  /// 不自动下载；文件不存在或无效则返回 null。
-  static Future<String?> ensureModelAvailable() async {
-    if (_cachedModelPath != null) {
-      final f = File(_cachedModelPath!);
-      if (await f.exists() && await f.length() > _validModelMinSize) {
-        return _cachedModelPath!;
+    if (legacy.id == 'deoldify-int8') {
+      for (final suffix in ['', '.bak']) {
+        final oldFile = File(
+          path.join(dir.path, 'deoldify_artistic.onnx$suffix'),
+        );
+        final destination = File(
+          path.join(dir.path, '${legacy.fileName}$suffix'),
+        );
+        if (await oldFile.exists() && !await destination.exists()) {
+          await ImageAiService.instance.resetSession();
+          await oldFile.rename(destination.path);
+        }
       }
-      _cachedModelPath = null;
     }
-
-    final dir = await getApplicationSupportDirectory();
-    final targetPath = path.join(dir.path, modelFileName);
-    final targetFile = File(targetPath);
-
-    if (await targetFile.exists()) {
-      final size = await targetFile.length();
-      if (size > _validModelMinSize) {
-        _cachedModelPath = targetPath;
-        return targetPath;
-      }
-      // 文件不完整，删除
-      await targetFile.delete();
+    final custom = prefs.getBool('colorization_custom_model_active');
+    if (custom != null) await prefs.setBool(_key('custom', legacy), custom);
+    final name = prefs.getString('colorization_custom_model_name');
+    if (name != null) await prefs.setString(_key('custom_name', legacy), name);
+    final urls = prefs.getStringList('colorization_model_urls');
+    if (urls != null) {
+      await prefs.setStringList(_key('urls', modelVariants.first), urls);
     }
-
-    return null;
+    await prefs.setBool(_migrationKey, true);
   }
 
-  /// 当前选中的模型变体
-  static Future<String> getSelectedVariant() async {
-    final prefs = await SharedPreferences.getInstance();
-    _selectedVariant = prefs.getString(_variantKey) ?? 'deoldify';
-    return _selectedVariant;
+  static Future<ColorizationModelVariant> getSelectedDefinition() async {
+    await _initialize();
+    return _definition(_selectedVariant);
   }
 
-  /// 设置选中的模型变体（影响下载源）
+  static Future<String> getSelectedVariant() async =>
+      (await getSelectedDefinition()).id;
+
   static Future<void> setSelectedVariant(String id) async {
-    _selectedVariant = id;
+    _definition(id);
+    await _initialize();
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_variantKey, id);
+    _selectedVariant = id;
   }
 
-  /// 取指定变体的下载 URL 列表（含镜像回退）
-  static List<String> _urlsForVariant(String variant) {
-    if (variant == 'deoldify-int8') return List.from(_int8ModelUrls);
-    return List.from(_defaultModelUrls); // 用户编辑的镜像列表在 downloadModel 内取
+  static Future<List<String>> getModelUrls({
+    ColorizationModelVariant? model,
+  }) async {
+    final def = model ?? await getSelectedDefinition();
+    if (!def.canDownload) return [];
+    final prefs = await SharedPreferences.getInstance();
+    return List.from(prefs.getStringList(_key('urls', def)) ?? def.defaultUrls);
   }
 
-  /// 手动触发模型下载，支持进度回调和断点续传。
-  /// [variant] 指定下载哪个变体（'deoldify' 默认，'deoldify-int8' 轻量）。
+  static Future<void> addModelUrl(String url) async {
+    final def = await getSelectedDefinition();
+    if (!def.canDownload) {
+      throw StateError('This model supports local import only');
+    }
+    final urls = await getModelUrls(model: def);
+    final trimmed = url.trim();
+    if (trimmed.isEmpty || urls.contains(trimmed)) return;
+    urls.add(trimmed);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(_key('urls', def), urls);
+  }
+
+  static Future<void> removeModelUrlAt(int index) async {
+    final def = await getSelectedDefinition();
+    final urls = await getModelUrls(model: def);
+    if (index < 0 || index >= urls.length) return;
+    urls.removeAt(index);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(_key('urls', def), urls);
+  }
+
+  static Future<void> resetModelUrls() async {
+    final def = await getSelectedDefinition();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_key('urls', def));
+  }
+
+  static Future<bool> isCustomModelActive({
+    ColorizationModelVariant? model,
+  }) async {
+    final def = model ?? await getSelectedDefinition();
+    final prefs = await SharedPreferences.getInstance();
+    return (prefs.getBool(_key('custom', def)) ?? false) &&
+        await ensureModelAvailable(model: def) != null;
+  }
+
+  static Future<String?> getCustomModelName({
+    ColorizationModelVariant? model,
+  }) async {
+    final def = model ?? await getSelectedDefinition();
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_key('custom_name', def));
+  }
+
+  static Future<void> _clearCustomRecord(ColorizationModelVariant def) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_key('custom', def), false);
+    await prefs.remove(_key('custom_name', def));
+  }
+
+  static Future<void> clearCustomModelSelection() async {
+    final def = await getSelectedDefinition();
+    final dir = await getApplicationSupportDirectory();
+    final targetPath = path.join(dir.path, def.fileName);
+    final backup = File('$targetPath.bak');
+    if (await backup.exists()) {
+      await ImageAiService.instance.installStagedModel(
+        backup.path,
+        targetPath,
+        def.type,
+      );
+    } else {
+      await ImageAiService.instance.resetSession();
+      final target = File(targetPath);
+      if (await target.exists()) await target.delete();
+    }
+    await _clearCustomRecord(def);
+  }
+
+  static Future<void> markCustomModelActive(
+    String displayName, {
+    ColorizationModelVariant? model,
+  }) async {
+    final def = model ?? await getSelectedDefinition();
+    final dir = await getApplicationSupportDirectory();
+    await ImageAiService.instance.getModelInfo(
+      path.join(dir.path, def.fileName),
+      def.type,
+    );
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_key('custom', def), true);
+    await prefs.setString(_key('custom_name', def), displayName);
+  }
+
+  /// Installed is distinct from ready: native getModelInfo validates the graph.
+  static Future<String?> ensureModelAvailable({
+    ColorizationModelVariant? model,
+  }) async {
+    final def = model ?? await getSelectedDefinition();
+    final dir = await getApplicationSupportDirectory();
+    final target = File(path.join(dir.path, def.fileName));
+    return await target.exists() && await target.length() > 0
+        ? target.path
+        : null;
+  }
+
+  static Future<bool> get isModelDownloaded async =>
+      await ensureModelAvailable() != null;
+
+  static Future<int> getDownloadedSize() async {
+    final targetPath = await ensureModelAvailable();
+    return targetPath == null ? 0 : File(targetPath).length();
+  }
+
+  static double get downloadProgress => downloadState.value?.progress ?? 0;
+  static bool get isDownloading => _downloadTask != null;
+  static String? get currentStatus => downloadState.value?.message;
+
+  /// Concurrent callers observe the running model, not a second transfer.
   static Future<void> downloadModel({
-    String variant = 'deoldify',
+    String? variant,
+    bool nonCommercialAccepted = false,
     void Function(double progress)? onProgress,
     void Function(String status)? onStatus,
-  }) async {
-    if (_isDownloading) {
-      throw Exception('Model is already downloading');
+  }) {
+    final existing = _downloadTask;
+    final Future<void> task;
+    if (existing != null) {
+      task = existing;
+    } else {
+      final requestedId = variant ?? _selectedVariant;
+      final Future<ColorizationModelVariant> Function() definition =
+          variant == null
+          ? getSelectedDefinition
+          : () async => _definition(variant);
+      task = _downloadTask = Future<void>.microtask(
+        () => _downloadModel(definition, requestedId, nonCommercialAccepted),
+      );
     }
+    return forwardModelDownloadCallbacks(
+      task,
+      downloadState,
+      onProgress: onProgress,
+      onStatus: onStatus,
+      replay: existing != null,
+    );
+  }
 
-    final dir = await getApplicationSupportDirectory();
-    final targetPath = path.join(dir.path, modelFileName);
-    final tempPath = '$targetPath.tmp';
-    final tempFile = File(tempPath);
-
-    _isDownloading = true;
-    _downloadProgress = 0.0;
-
-    void reportStatus(String status) {
-      _currentStatus = status;
-      onStatus?.call(status);
+  static Future<void> _downloadModel(
+    Future<ColorizationModelVariant> Function() definition,
+    String requestedId,
+    bool nonCommercialAccepted,
+  ) async {
+    ColorizationModelVariant? capturedDef;
+    var receivedBytes = 0;
+    var totalBytes = 0;
+    var message = 'Preparing download...';
+    void report({String? status, bool active = true, String? error}) {
+      if (status != null) message = status;
+      downloadState.value = ModelDownloadState(
+        modelId: capturedDef?.id ?? requestedId,
+        modelName: capturedDef?.label ?? requestedId,
+        message: message,
+        receivedBytes: receivedBytes,
+        totalBytes: totalBytes,
+        isDownloading: active,
+        error: error,
+      );
     }
 
     try {
-      // 删除旧的临时文件
-      if (await tempFile.exists()) {
-        await tempFile.delete();
+      report();
+      final def = await definition();
+      capturedDef = def;
+      report();
+      if (!def.canDownload) {
+        throw StateError(
+          'This model supports local import only: upstream license unresolved',
+        );
       }
-
-      Exception? lastError;
-      // deoldify 用用户可编辑的镜像列表；int8 用内置镜像
-      final urls =
-          variant == 'deoldify-int8'
-              ? _urlsForVariant(variant)
-              : await getModelUrls();
-      final minSize =
-          variant == 'deoldify-int8'
-              ? _validModelMinSize
-              : expectedFileSize ~/ 2;
-
-      for (int i = 0; i < urls.length; i++) {
-        final url = urls[i];
-        reportStatus('Trying mirror ${i + 1}/${urls.length}...');
+      if (def.requiresNonCommercialConsent && !nonCommercialAccepted) {
+        throw StateError(
+          'CC BY-NC-SA 4.0 non-commercial license acceptance required',
+        );
+      }
+      final dir = await getApplicationSupportDirectory();
+      final targetPath = path.join(dir.path, def.fileName);
+      final tempFile = File('$targetPath.tmp');
+      if (await tempFile.exists()) await tempFile.delete();
+      Object? lastError;
+      StackTrace? lastStack;
+      final urls = await getModelUrls(model: def);
+      for (var i = 0; i < urls.length; i++) {
+        receivedBytes = 0;
+        totalBytes = 0;
+        report(status: 'Downloading from mirror ${i + 1}/${urls.length}...');
         try {
-          await _downloadWithResume(url, tempPath, (received, total) {
-            _downloadProgress = total > 0 ? received / total : 0;
-            onProgress?.call(_downloadProgress);
+          await _downloadWithResume(urls[i], tempFile.path, (received, total) {
+            receivedBytes = received;
+            totalBytes = total;
+            report();
           });
-          final downloaded = await File(tempPath).length();
-          if (downloaded > minSize) {
-            await File(tempPath).rename(targetPath);
-            _cachedModelPath = targetPath;
-            _customModelActive = false;
-            final prefs = await SharedPreferences.getInstance();
-            await prefs.setBool(_customModelActiveKey, false);
-            await prefs.remove(_customModelNameKey);
-            _downloadProgress = 1.0;
-            reportStatus('Download complete');
-            return;
+          final downloaded = await tempFile.length();
+          if (downloaded == 0) {
+            throw StateError('Empty model download');
           }
-          await File(tempPath).delete();
-        } catch (e) {
-          lastError = e is Exception ? e : Exception(e.toString());
-          reportStatus('Mirror ${i + 1} failed: $e');
-          // 清理临时文件
-          if (await tempFile.exists()) {
-            await tempFile.delete();
+          if (def.sha256Digest != null) {
+            report(status: 'Verifying SHA-256...');
+            final digest = await ImageAiService.instance.modelIdentity(
+              tempFile.path,
+            );
+            if (digest != def.sha256Digest) {
+              throw StateError('Model SHA-256 mismatch');
+            }
           }
+          report(status: 'Validating and installing model...');
+          await ImageAiService.instance.installStagedModel(
+            tempFile.path,
+            targetPath,
+            def.type,
+          );
+          final oldBackup = File('$targetPath.bak');
+          if (await oldBackup.exists()) await oldBackup.delete();
+          await _clearCustomRecord(def);
+          receivedBytes = downloaded;
+          totalBytes = downloaded;
+          report(status: 'Download complete', active: false);
+          return;
+        } catch (error, stack) {
+          lastError = error;
+          lastStack = stack;
+          report(status: 'Mirror ${i + 1} failed: $error');
+          if (await tempFile.exists()) await tempFile.delete();
         }
       }
-      throw lastError ?? Exception('All model download URLs failed');
+      if (lastError != null) {
+        Error.throwWithStackTrace(lastError, lastStack!);
+      }
+      throw StateError('All model download URLs failed');
+    } catch (error) {
+      report(status: 'Download failed: $error', active: false, error: '$error');
+      rethrow;
     } finally {
-      _isDownloading = false;
+      _downloadTask = null;
     }
   }
 
-  /// 使用 HttpClient 下载，支持 Range 断点续传和实时进度
   static Future<void> _downloadWithResume(
     String url,
     String targetPath,
@@ -305,112 +468,52 @@ class ColorizationModelManager {
   ) async {
     final client = HttpClient();
     final file = File(targetPath);
-    int startByte = 0;
-    if (await file.exists()) {
-      startByte = await file.length();
-    }
-
+    var startByte = await file.exists() ? await file.length() : 0;
     IOSink? sink;
     try {
-      final uri = Uri.parse(url);
-      final request = await client.getUrl(uri);
+      final request = await client.getUrl(Uri.parse(url));
       request.followRedirects = true;
       request.headers.set('User-Agent', 'Venera/1.0');
       request.headers.set('Accept', '*/*');
-      request.headers.set('Connection', 'keep-alive');
-      if (startByte > 0) {
-        request.headers.set('Range', 'bytes=$startByte-');
-      }
-
+      if (startByte > 0) request.headers.set('Range', 'bytes=$startByte-');
       final response = await request.close();
       if (response.statusCode != HttpStatus.ok &&
           response.statusCode != HttpStatus.partialContent) {
-        throw Exception('HTTP ${response.statusCode}');
+        throw HttpException('HTTP ${response.statusCode}');
       }
-
-      final contentLength = response.contentLength;
-      int received = startByte;
-      final total = contentLength > 0 ? contentLength + startByte : 0;
-
+      if (response.statusCode == HttpStatus.ok) startByte = 0;
+      var received = startByte;
+      final total = response.contentLength > 0
+          ? response.contentLength + startByte
+          : 0;
       sink = file.openWrite(
         mode: startByte > 0 ? FileMode.append : FileMode.write,
       );
-
-      await for (final chunk in response) {
-        sink.add(chunk);
-        received += chunk.length;
-        onProgress(received, total);
-      }
+      await sink.addStream(
+        response.map((chunk) {
+          received += chunk.length;
+          onProgress(received, total);
+          return chunk;
+        }),
+      );
       await sink.close();
-    } catch (e) {
-      sink?.close();
+    } catch (_) {
+      await sink?.close();
       rethrow;
     } finally {
       client.close();
     }
   }
 
-  /// 模型是否已下载且完整（含自选外部模型与已落盘到调用位置的任意变体）
-  static Future<bool> get isModelDownloaded async {
-    final dir = await getApplicationSupportDirectory();
-    final targetPath = path.join(dir.path, modelFileName);
-    final targetFile = File(targetPath);
-    if (await targetFile.exists()) {
-      final size = await targetFile.length();
-      if (size > _validModelMinSize) return true;
-    }
-    if (_cachedModelPath != null) return true;
-    return false;
-  }
-
-  /// 获取已下载模型大小（字节）
-  static Future<int> getDownloadedSize() async {
-    final dir = await getApplicationSupportDirectory();
-    final targetPath = path.join(dir.path, modelFileName);
-    final targetFile = File(targetPath);
-    if (!await targetFile.exists()) return 0;
-    return await targetFile.length();
-  }
-
-  /// 获取下载进度（0.0 - 1.0）
-  static double get downloadProgress => _downloadProgress;
-
-  /// 是否正在下载
-  static bool get isDownloading => _isDownloading;
-
-  /// 当前状态文本
-  static String? get currentStatus => _currentStatus;
-
-  /// 清除模型文件（含自选外部模型备份）
   static Future<void> clearModel() async {
+    final def = await getSelectedDefinition();
+    await ImageAiService.instance.resetSession();
     final dir = await getApplicationSupportDirectory();
-    final targetPath = path.join(dir.path, modelFileName);
-    final tempPath = '$targetPath.tmp';
-    final bakPath = '$targetPath.bak';
-    final targetFile = File(targetPath);
-    final tempFile = File(tempPath);
-    final bakFile = File(bakPath);
-    if (await targetFile.exists()) {
-      await targetFile.delete();
+    final targetPath = path.join(dir.path, def.fileName);
+    for (final suffix in ['', '.tmp', '.bak']) {
+      final file = File('$targetPath$suffix');
+      if (await file.exists()) await file.delete();
     }
-    if (await tempFile.exists()) {
-      await tempFile.delete();
-    }
-    if (await bakFile.exists()) {
-      await bakFile.delete();
-    }
-    _cachedModelPath = null;
-    _customModelActive = false;
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(_customModelActiveKey, false);
-    await prefs.remove(_customModelNameKey);
+    await _clearCustomRecord(def);
   }
-}
-
-/// 模型变体描述（设置页用于切换下载源；推理逻辑不变）
-class ColorizationModelVariant {
-  final String id;
-  final String label;
-
-  const ColorizationModelVariant(this.id, this.label);
 }

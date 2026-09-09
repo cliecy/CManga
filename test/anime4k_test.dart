@@ -45,24 +45,6 @@ void main() {
       expect(decoded.height, 16);
     });
 
-    test('produces a valid PNG signature', () {
-      final src = img.Image(width: 4, height: 4, numChannels: 4);
-      img.fill(src, color: img.ColorRgba8(128, 128, 128, 255));
-
-      final params = Anime4KParams(
-        imageBytes: Uint8List.fromList(img.encodePng(src)),
-        scaleFactor: 1.5,
-      );
-
-      final result = Anime4KUpscaler.processDirect(params);
-      expect(result, isNotNull);
-      // PNG signature: 137 80 78 71 13 10 26 10
-      expect(result![0], 0x89);
-      expect(result[1], 0x50); // 'P'
-      expect(result[2], 0x4E); // 'N'
-      expect(result[3], 0x47); // 'G'
-    });
-
     test('returns null for invalid image bytes', () {
       final params = Anime4KParams(
         imageBytes: Uint8List.fromList([0, 1, 2, 3, 4]),
@@ -90,27 +72,6 @@ void main() {
       expect(decoded.height, 6);
     });
 
-    test('handles 3x scale factor', () {
-      final src = img.Image(width: 5, height: 5, numChannels: 4);
-      for (int y = 0; y < 5; y++) {
-        for (int x = 0; x < 5; x++) {
-          src.setPixelRgba(x, y, x * 50, y * 50, 128, 255);
-        }
-      }
-
-      final params = Anime4KParams(
-        imageBytes: Uint8List.fromList(img.encodePng(src)),
-        scaleFactor: 3.0,
-      );
-
-      final result = Anime4KUpscaler.processDirect(params);
-      expect(result, isNotNull);
-      final decoded = img.decodeImage(result!);
-      expect(decoded, isNotNull);
-      expect(decoded!.width, 15);
-      expect(decoded.height, 15);
-    });
-
     test('preserves alpha channel in output', () {
       final src = img.Image(width: 6, height: 6, numChannels: 4);
       // Half transparent, half opaque.
@@ -130,13 +91,13 @@ void main() {
       expect(result, isNotNull);
       final decoded = img.decodeImage(result!);
       expect(decoded, isNotNull);
-      // Output should be 4-channel (RGBA)
-      expect(decoded!.numChannels, 4);
+      expect(decoded!.getPixel(0, 0).a, 0);
+      expect(decoded.getPixel(decoded.width - 1, 0).a, 255);
     });
   });
 
   group('Anime4KUpscaler.processInIsolate', () {
-    test('falls back to direct processing when isolate fails', () async {
+    test('produces the requested dimensions in a worker isolate', () async {
       final src = img.Image(width: 8, height: 8, numChannels: 4);
       img.fill(src, color: img.ColorRgba8(180, 180, 180, 255));
 
@@ -145,9 +106,6 @@ void main() {
         scaleFactor: 2.0,
       );
 
-      // processInIsolate should either succeed via compute() or fall back
-      // to _processImage in the current isolate. Either way, the result
-      // must be non-null for valid input.
       final result = await Anime4KUpscaler.processInIsolate(params);
       expect(result, isNotNull);
       expect(result!.isNotEmpty, true);
@@ -157,5 +115,74 @@ void main() {
       expect(decoded!.width, 16);
       expect(decoded.height, 16);
     });
+  });
+
+  group('independent enhancement strength', () {
+    test(
+      'half strength mixes in linear light, not by changing contrast',
+      () async {
+        final source = img.Image(width: 1, height: 1, numChannels: 4);
+        final enhanced = img.Image(width: 1, height: 1, numChannels: 4);
+        source.setPixelRgba(0, 0, 0, 0, 0, 255);
+        enhanced.setPixelRgba(0, 0, 255, 255, 255, 255);
+        final result = await Anime4KUpscaler.renderInIsolate(
+          Anime4KRenderParams(
+            imageBytes: Uint8List.fromList(img.encodePng(source)),
+            enhancedBytes: Uint8List.fromList(img.encodePng(enhanced)),
+            scaleFactor: 1,
+            strength: .5,
+          ),
+        );
+        final pixel = img.decodePng(result)!.getPixel(0, 0);
+        expect(pixel.r, closeTo(188, 1));
+        expect(pixel.g, closeTo(188, 1));
+        expect(pixel.b, closeTo(188, 1));
+        expect(pixel.a, 255);
+      },
+    );
+
+    test(
+      'zero strength resizes odd dimensions without an enhanced image',
+      () async {
+        final source = img.Image(width: 7, height: 11, numChannels: 4);
+        img.fill(source, color: img.ColorRgba8(50, 100, 150, 255));
+        final result = await Anime4KUpscaler.renderInIsolate(
+          Anime4KRenderParams(
+            imageBytes: Uint8List.fromList(img.encodePng(source)),
+            scaleFactor: 1.3,
+            strength: 0,
+          ),
+        );
+        final decoded = img.decodePng(result)!;
+        expect((decoded.width, decoded.height), (9, 14));
+        expect(decoded.getPixel(4, 7).r, closeTo(50, 1));
+        expect(decoded.getPixel(4, 7).g, closeTo(100, 1));
+        expect(decoded.getPixel(4, 7).b, closeTo(150, 1));
+      },
+    );
+
+    test(
+      'transparent hidden colors do not bleed into the visible edge',
+      () async {
+        final source = img.Image(width: 2, height: 1, numChannels: 4);
+        source.setPixelRgba(0, 0, 255, 0, 0, 0);
+        source.setPixelRgba(1, 0, 0, 0, 255, 255);
+        final result = await Anime4KUpscaler.renderInIsolate(
+          Anime4KRenderParams(
+            imageBytes: Uint8List.fromList(img.encodePng(source)),
+            scaleFactor: 2,
+            strength: 0,
+          ),
+        );
+        final decoded = img.decodePng(result)!;
+        for (final pixel in decoded) {
+          if (pixel.a > 0) {
+            expect(pixel.r, 0);
+            expect(pixel.g, 0);
+            expect(pixel.b, closeTo(255, 1));
+          }
+        }
+      },
+    );
   });
 }

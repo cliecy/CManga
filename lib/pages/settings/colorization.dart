@@ -4,7 +4,10 @@ part of 'settings_page.dart';
 ///
 /// 参考 Anime4K 设置页的模式。提供开关、强度调节和模型管理。
 class ColorizationSettings extends StatefulWidget {
-  const ColorizationSettings({super.key});
+  const ColorizationSettings({super.key, this.modelsOnly = false});
+
+  /// Render model management slivers inside the reader's settings viewport.
+  final bool modelsOnly;
 
   @override
   State<ColorizationSettings> createState() => _ColorizationSettingsState();
@@ -12,18 +15,52 @@ class ColorizationSettings extends StatefulWidget {
 
 class _ColorizationSettingsState extends State<ColorizationSettings> {
   bool _isModelDownloaded = false;
-  bool _isDownloading = false;
-  double _downloadProgress = 0.0;
-  String _status = '';
+  bool get _isDownloading =>
+      ColorizationModelManager.downloadState.value?.isDownloading ?? false;
   String? _customModelName;
   List<String> _modelUrls = [];
   bool _usingCustom = false;
   String _selectedVariant = 'deoldify';
+  static final ValueNotifier<bool> _modelManagementBusy = ValueNotifier(false);
+  bool _loadingModelStatus = true;
+  bool get _busy =>
+      _isDownloading || _modelManagementBusy.value || _loadingModelStatus;
+
+  Future<void> _manageModel(Future<void> Function() action) async {
+    if (_busy) return;
+    _modelManagementBusy.value = true;
+    try {
+      await action();
+    } catch (e) {
+      if (mounted) context.showMessage(message: e.toString());
+    } finally {
+      _modelManagementBusy.value = false;
+    }
+  }
 
   @override
   void initState() {
     super.initState();
+    ColorizationModelManager.downloadState.addListener(_downloadChanged);
+    _modelManagementBusy.addListener(_managementChanged);
     _refreshModelStatus();
+  }
+
+  @override
+  void dispose() {
+    ColorizationModelManager.downloadState.removeListener(_downloadChanged);
+    _modelManagementBusy.removeListener(_managementChanged);
+    super.dispose();
+  }
+
+  void _downloadChanged() {
+    if (!_isDownloading) _refreshModelStatus();
+    if (mounted) setState(() {});
+  }
+
+  void _managementChanged() {
+    if (!_modelManagementBusy.value) _refreshModelStatus();
+    if (mounted) setState(() {});
   }
 
   Future<void> _refreshModelStatus() async {
@@ -39,67 +76,72 @@ class _ColorizationSettingsState extends State<ColorizationSettings> {
         _isModelDownloaded = downloaded;
         _usingCustom = usingCustom;
         _selectedVariant = variant;
+        _loadingModelStatus = false;
       });
     }
   }
 
-  String get _selectedVariantLabel {
-    final v = ColorizationModelManager.modelVariants.firstWhere(
-      (e) => e.id == _selectedVariant,
-      orElse: () => const ColorizationModelVariant('deoldify', 'DeOldify Artistic'),
-    );
-    return v.label;
+  ColorizationModelVariant get _selectedDefinition =>
+      ColorizationModelManager.modelVariants.firstWhere(
+        (model) => model.id == _selectedVariant,
+        orElse: () => ColorizationModelManager.modelVariants.first,
+      );
+
+  Future<void> _selectModel(String id) async {
+    await ColorizationModelManager.setSelectedVariant(id);
+    await ColorizationService.instance.resetNativeSession();
+    await ColorizationService.instance.checkModelAvailable();
+    await _refreshModelStatus();
+    _refreshAiImages();
   }
 
   Future<void> _downloadModel() async {
     if (_isDownloading) return;
-    setState(() {
-      _isDownloading = true;
-      _downloadProgress = 0.0;
-      _status = 'Preparing...';
-    });
+    final model = _selectedDefinition;
+    if (!model.canDownload) return;
+    if (model.requiresNonCommercialConsent) {
+      final accepted = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => ContentDialog(
+          title: 'Non-commercial model license'.tl,
+          content: Text(
+            model.licenseNote.tl,
+          ).paddingHorizontal(16).fixWidth(double.infinity),
+          actions: [
+            Button.filled(
+              onPressed: () => dialogContext.pop(true),
+              child: Text('Accept non-commercial use only'.tl),
+            ),
+            Button.outlined(
+              onPressed: () => dialogContext.pop(false),
+              child: Text('Cancel'.tl),
+            ),
+          ],
+        ),
+      );
+      if (accepted != true || !mounted) return;
+    }
 
     try {
       await ColorizationModelManager.downloadModel(
-        variant: _selectedVariant,
-        onProgress: (progress) {
-          if (mounted) {
-            setState(() {
-              _downloadProgress = progress;
-              _status = 'Downloading ${(progress * 100).toStringAsFixed(1)}%';
-            });
-          }
-        },
-        onStatus: (status) {
-          if (mounted) {
-            setState(() {
-              _status = status;
-            });
-          }
-        },
+        variant: model.id,
+        nonCommercialAccepted: model.requiresNonCommercialConsent,
       );
       if (mounted) {
         context.showMessage(message: "Model downloaded".tl);
       }
     } catch (e) {
       if (mounted) {
-        context.showMessage(message: "Download failed: @e".tlParams({'e': e.toString()}));
+        context.showMessage(
+          message: "Download failed: @e".tlParams({'e': e.toString()}),
+        );
       }
     } finally {
-      _isDownloading = false;
       // 模型文件已变更，失效原生会话缓存并刷新服务路径缓存
       await ColorizationService.instance.resetNativeSession();
       await ColorizationService.instance.checkModelAvailable();
       await _refreshModelStatus();
-      if (mounted) {
-        setState(() {
-          if (_isModelDownloaded) {
-            _status = 'Ready';
-          } else {
-            _status = '';
-          }
-        });
-      }
+      _refreshAiImages();
     }
   }
 
@@ -110,75 +152,43 @@ class _ColorizationSettingsState extends State<ColorizationSettings> {
     await ColorizationService.instance.resetNativeSession();
     await ColorizationService.instance.checkModelAvailable();
     await _refreshModelStatus();
+    _refreshAiImages();
     if (mounted) {
       context.showMessage(message: "Model deleted".tl);
-      setState(() {
-        _status = '';
-        _downloadProgress = 0.0;
-      });
     }
   }
 
   /// 选择本地 .onnx 模型文件（优先级高于内置下载模型）
   Future<void> _pickLocalModel() async {
     try {
-      final xFile = await file_selector.openFile(
-        acceptedTypeGroups: <file_selector.XTypeGroup>[
-          file_selector.XTypeGroup(
-            label: 'ONNX Model',
-            extensions: ['onnx'],
-          ),
-        ],
-      );
+      final model = await ColorizationModelManager.getSelectedDefinition();
+      final xFile = await selectFile(ext: ['onnx']);
       if (xFile == null) return;
-      if (!xFile.name.toLowerCase().endsWith('.onnx')) {
-        if (mounted) context.showMessage(message: "Please select a .onnx file".tl);
-        return;
-      }
-      // 通过原生 ContentResolver 以 64KB 分块拷贝（不占内存、不拷坏），
-      // 直接落到模型调用位置 deoldify_artistic.onnx。
-      // 这是“选择外部模型崩溃”的根治：openRead() 在 content URI 下会把整文件读入内存
-      // （OOM）或产出损坏文件（原生 createSession 读到坏模型 → segfault）。
-      final uri = xFile.path; // content URI 或真实文件路径
       final dir = await getApplicationSupportDirectory();
-      final targetPath = path.join(dir.path, ColorizationModelManager.modelFileName);
-      final bakPath = '$targetPath.bak';
-      final tempPath = '$targetPath.tmp';
-
-      // 已存在下载模型则先备份，便于“回退内置模型”还原
-      final targetFile = File(targetPath);
-      if (await targetFile.exists()) {
-        await targetFile.rename(bakPath);
-      }
-
-      int written;
-      try {
-        written = await ColorizationService.instance.copyUriTo(uri, tempPath);
-      } catch (e) {
-        // 拷贝失败：还原备份
-        if (await File(bakPath).exists()) await File(bakPath).rename(targetPath);
-        if (mounted) context.showMessage(message: "Failed to copy file: @e".tlParams({'e': e.toString()}));
-        return;
-      }
-
-      if (written < ColorizationModelManager.validModelMinSize) {
-        await File(tempPath).delete().catchError((_) {});
-        if (await File(bakPath).exists()) await File(bakPath).rename(targetPath);
-        if (mounted) context.showMessage(message: "File too small, invalid model".tl);
-        return;
-      }
-
-      await File(tempPath).rename(targetPath);
-      await File(bakPath).delete().catchError((_) {});
+      final targetPath = path.join(dir.path, model.fileName);
+      await ImageAiService.instance.installModelFile(
+        xFile.path,
+        targetPath,
+        model.type,
+        preserveBackup: true,
+      );
 
       // 记账为自选模型 + 失效原生会话缓存 + 让服务立即感知新路径
-      await ColorizationModelManager.markCustomModelActive(xFile.name);
+      await ColorizationModelManager.markCustomModelActive(
+        xFile.name,
+        model: model,
+      );
       await ColorizationService.instance.resetNativeSession();
       await ColorizationService.instance.checkModelAvailable();
       await _refreshModelStatus();
+      _refreshAiImages();
       if (mounted) context.showMessage(message: "Custom model selected".tl);
     } catch (e) {
-      if (mounted) context.showMessage(message: "Failed to pick file: @e".tlParams({'e': e.toString()}));
+      if (mounted) {
+        context.showMessage(
+          message: "Failed to pick file: @e".tlParams({'e': e.toString()}),
+        );
+      }
     }
   }
 
@@ -188,6 +198,7 @@ class _ColorizationSettingsState extends State<ColorizationSettings> {
     await ColorizationService.instance.resetNativeSession();
     await ColorizationService.instance.checkModelAvailable();
     await _refreshModelStatus();
+    _refreshAiImages();
     if (mounted) context.showMessage(message: "Reverted to built-in model".tl);
   }
 
@@ -196,7 +207,7 @@ class _ColorizationSettingsState extends State<ColorizationSettings> {
     await showInputDialog(
       context: context,
       title: "Add Mirror URL".tl,
-      hintText: "https://.../deoldify.onnx",
+      hintText: 'https://.../${_selectedDefinition.fileName}',
       confirmText: "Add".tl,
       onConfirm: (url) async {
         await ColorizationModelManager.addModelUrl(url);
@@ -214,215 +225,227 @@ class _ColorizationSettingsState extends State<ColorizationSettings> {
 
   @override
   Widget build(BuildContext context) {
-    return SmoothCustomScrollView(
-      slivers: [
+    final slivers = <Widget>[
+      if (!widget.modelsOnly) ...[
         SliverAppbar(title: Text("Colorization".tl)),
         _SwitchSetting(
           title: "Enable Image Colorization".tl,
-          subtitle:
-              _isModelDownloaded
-                  ? "Model is ready".tl
-                  : "Download model below to enable".tl,
+          subtitle: _isModelDownloaded
+              ? "Model file downloaded".tl
+              : "Download model below to enable".tl,
           settingKey: "enableColorization",
+          onChanged: _refreshAiImages,
+          beforeChange: (enabled) async {
+            if (!enabled) return true;
+            if (!await _allowImageAi(context)) return false;
+            final ready = await ColorizationService.instance
+                .checkModelAvailable();
+            if (!ready && mounted) {
+              context.showMessage(
+                message: ImageAiService.instance.status.value.message.tl,
+              );
+            }
+            return ready;
+          },
         ).toSliver(),
-        _SliderSetting(
-          title: "Colorization Intensity".tl,
-          settingsIndex: "colorizationIntensity",
-          min: 0.3,
-          max: 1.2,
-          interval: 0.05,
+        _ImageAiControls(
+          key: ValueKey('$_selectedVariant@$_customModelName'),
+          superResolution: false,
         ).toSliver(),
-        // 模型管理区域
-        SliverToBoxAdapter(
+      ],
+      // 模型管理区域
+      SliverToBoxAdapter(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+          child: Text(
+            "Model Management".tl,
+            style: TextStyle(
+              color: context.colorScheme.primary,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
+      ),
+      SliverToBoxAdapter(
+        child: Card(
+          margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-            child: Text(
-              "Model Management".tl,
-              style: TextStyle(
-                color: context.colorScheme.primary,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-          ),
-        ),
-        SliverToBoxAdapter(
-          child: Card(
-            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          _selectedVariantLabel,
-                          style: const TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  // 模型变体选择器（仅切换下载源，推理逻辑不变）
-                  Wrap(
-                    spacing: 8,
-                    children:
-                        ColorizationModelManager.modelVariants.map((v) {
-                          final selected = _selectedVariant == v.id;
-                          return ChoiceChip(
-                            label: Text(v.label.tl),
-                            selected: selected,
-                            onSelected: (_) async {
-                              await ColorizationModelManager.setSelectedVariant(
-                                v.id,
-                              );
-                              await _refreshModelStatus();
-                            },
-                          );
-                        }).toList(),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    _isModelDownloaded
-                        ? "Model downloaded".tl
-                        : (_selectedVariant == 'deoldify-int8'
-                            ? "Model not downloaded (lightweight)".tl
-                            : "Model not downloaded (~243MB)".tl),
-                    style: TextStyle(
-                      color: context.colorScheme.onSurfaceVariant,
-                      fontSize: 12,
-                    ),
-                  ),
-                  if (_status.isNotEmpty) ...[
-                    const SizedBox(height: 8),
-                    Text(
-                      _status,
-                      style: TextStyle(
-                        color: context.colorScheme.primary,
-                        fontSize: 12,
-                      ),
-                    ),
-                  ],
-                  if (_isDownloading) ...[
-                    const SizedBox(height: 8),
-                    LinearProgressIndicator(value: _downloadProgress),
-                  ],
-                  const SizedBox(height: 12),
-                  if (!_usingCustom)
-                    Row(
-                      children: [
-                      if (!_isModelDownloaded)
-                        Expanded(
-                          child: ElevatedButton.icon(
-                            onPressed:
-                                _isDownloading ? null : _downloadModel,
-                            icon:
-                                _isDownloading
-                                    ? const SizedBox(
-                                      width: 16,
-                                      height: 16,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                      ),
-                                    )
-                                    : const Icon(Icons.download),
-                            label: Text(
-                              _isDownloading ? "Downloading...".tl : "Download Model".tl,
-                            ),
-                          ),
-                        ),
-                      if (_isModelDownloaded) ...[
-                        Expanded(
-                          child: OutlinedButton.icon(
-                            onPressed: _deleteModel,
-                            icon: const Icon(Icons.delete_outline),
-                            label: Text("Delete Model".tl),
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-        // 自选本地模型文件
-        SliverToBoxAdapter(
-          child: Card(
-            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Text(
-                        "Custom Model File".tl,
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        _selectedDefinition.label.tl,
                         style: const TextStyle(fontWeight: FontWeight.bold),
                       ),
-                      const SizedBox(width: 8),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: Colors.orange.withValues(alpha: 0.15),
-                          borderRadius: BorderRadius.circular(4),
-                          border: Border.all(
-                            color: Colors.orange.withValues(alpha: 0.4),
-                          ),
-                        ),
-                        child: Text(
-                          "实验性".tl,
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: Colors.orange.shade700,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    _usingCustom
-                        ? "Using: ${_customModelName ?? 'custom model'}".tl
-                        : "Select a local .onnx model to override the built-in one"
-                            .tl,
-                    style: TextStyle(
-                      color: context.colorScheme.onSurfaceVariant,
-                      fontSize: 12,
                     ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                // Selection controls both the native pipeline and installation.
+                Wrap(
+                  spacing: 8,
+                  children: ColorizationModelManager.modelVariants.map((v) {
+                    final selected = _selectedVariant == v.id;
+                    return ChoiceChip(
+                      label: Text(v.label.tl),
+                      selected: selected,
+                      onSelected: _busy
+                          ? null
+                          : (_) => _manageModel(() => _selectModel(v.id)),
+                    );
+                  }).toList(),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  _isModelDownloaded
+                      ? "Model downloaded".tl
+                      : 'Model not downloaded'.tl,
+                  style: TextStyle(
+                    color: context.colorScheme.onSurfaceVariant,
+                    fontSize: 12,
                   ),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
+                ),
+                const SizedBox(height: 8),
+                Text(_selectedDefinition.protocolNote.tl),
+                const SizedBox(height: 8),
+                Text(_selectedDefinition.licenseNote.tl),
+                const SizedBox(height: 8),
+                SelectableText(_selectedDefinition.sourceUrl),
+                if (_selectedDefinition.sizeBytes != null)
+                  Text('${_selectedDefinition.sizeBytes} bytes'),
+                _ModelDownloadProgress(
+                  state: ColorizationModelManager.downloadState.value,
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    if (!_isModelDownloaded && _selectedDefinition.canDownload)
                       Expanded(
                         child: ElevatedButton.icon(
-                          onPressed: _pickLocalModel,
-                          icon: const Icon(Icons.folder_open),
-                          label: Text("Select Model File".tl),
-                        ),
-                      ),
-                      if (_usingCustom) ...[
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: OutlinedButton.icon(
-                            onPressed: _clearCustomModel,
-                            icon: const Icon(Icons.restore),
-                            label: Text("Use Built-in".tl),
+                          onPressed: _busy
+                              ? null
+                              : () => _manageModel(_downloadModel),
+                          icon: _isDownloading
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.download),
+                          label: Text(
+                            _isDownloading
+                                ? "Downloading...".tl
+                                : "Download Model".tl,
                           ),
                         ),
-                      ],
+                      ),
+                    if (_isModelDownloaded) ...[
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: _busy
+                              ? null
+                              : () => _manageModel(_deleteModel),
+                          icon: const Icon(Icons.delete_outline),
+                          label: Text("Delete Model".tl),
+                        ),
+                      ),
                     ],
-                  ),
-                ],
-              ),
+                  ],
+                ),
+              ],
             ),
           ),
         ),
-        // 镜像 URL 管理
+      ),
+      // 自选本地模型文件
+      SliverToBoxAdapter(
+        child: Card(
+          margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Text(
+                      "Custom Model File".tl,
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 2,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.orange.withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(
+                          color: Colors.orange.withValues(alpha: 0.4),
+                        ),
+                      ),
+                      child: Text(
+                        "实验性".tl,
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: Colors.orange.shade700,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  _usingCustom
+                      ? "Using: ${_customModelName ?? 'custom model'}".tl
+                      : "Select a local .onnx model to override the built-in one"
+                            .tl,
+                  style: TextStyle(
+                    color: context.colorScheme.onSurfaceVariant,
+                    fontSize: 12,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        onPressed: _busy
+                            ? null
+                            : () => _manageModel(_pickLocalModel),
+                        icon: const Icon(Icons.folder_open),
+                        label: Text("Select Model File".tl),
+                      ),
+                    ),
+                    if (_customModelName != null) ...[
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: _busy
+                              ? null
+                              : () => _manageModel(_clearCustomModel),
+                          icon: const Icon(Icons.restore),
+                          label: Text('Restore preset / remove import'.tl),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+      // 镜像 URL 管理
+      if (_selectedDefinition.canDownload) ...[
         SliverToBoxAdapter(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
@@ -436,12 +459,14 @@ class _ColorizationSettingsState extends State<ColorizationSettings> {
           ),
         ),
         ..._modelUrls.asMap().entries.map(
-              (e) => _MirrorUrlTile(
-                index: e.key,
-                url: e.value,
-                onDelete: _removeMirrorUrl,
-              ),
-            ),
+          (e) => _MirrorUrlTile(
+            index: e.key,
+            url: e.value,
+            onDelete: _busy
+                ? null
+                : (index) => _manageModel(() => _removeMirrorUrl(index)),
+          ),
+        ),
         SliverToBoxAdapter(
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -449,7 +474,7 @@ class _ColorizationSettingsState extends State<ColorizationSettings> {
               children: [
                 Expanded(
                   child: OutlinedButton.icon(
-                    onPressed: _addMirrorUrl,
+                    onPressed: _busy ? null : () => _manageModel(_addMirrorUrl),
                     icon: const Icon(Icons.add),
                     label: Text("Add Mirror URL".tl),
                   ),
@@ -457,10 +482,12 @@ class _ColorizationSettingsState extends State<ColorizationSettings> {
                 const SizedBox(width: 8),
                 Expanded(
                   child: OutlinedButton.icon(
-                    onPressed: () async {
-                      await ColorizationModelManager.resetModelUrls();
-                      await _refreshModelStatus();
-                    },
+                    onPressed: _busy
+                        ? null
+                        : () => _manageModel(() async {
+                            await ColorizationModelManager.resetModelUrls();
+                            await _refreshModelStatus();
+                          }),
                     icon: const Icon(Icons.restart_alt),
                     label: Text("Reset".tl),
                   ),
@@ -469,6 +496,8 @@ class _ColorizationSettingsState extends State<ColorizationSettings> {
             ),
           ),
         ),
+      ],
+      if (!widget.modelsOnly)
         ListTile(
           title: Text("Clear Colorization Cache".tl),
           trailing: const Icon(Icons.delete_sweep),
@@ -479,8 +508,10 @@ class _ColorizationSettingsState extends State<ColorizationSettings> {
             }
           },
         ).toSliver(),
-      ],
-    );
+    ];
+    return widget.modelsOnly
+        ? SliverMainAxisGroup(slivers: slivers)
+        : SmoothCustomScrollView(slivers: slivers);
   }
 }
 
@@ -488,7 +519,7 @@ class _ColorizationSettingsState extends State<ColorizationSettings> {
 class _MirrorUrlTile extends StatelessWidget {
   final int index;
   final String url;
-  final void Function(int) onDelete;
+  final void Function(int)? onDelete;
 
   const _MirrorUrlTile({
     required this.index,
@@ -510,7 +541,7 @@ class _MirrorUrlTile extends StatelessWidget {
         ),
         trailing: IconButton(
           icon: const Icon(Icons.delete_outline, size: 20),
-          onPressed: () => onDelete(index),
+          onPressed: onDelete == null ? null : () => onDelete!(index),
         ),
       ),
     );

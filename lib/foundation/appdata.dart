@@ -30,7 +30,7 @@ class Appdata with Init {
       futures.add(file.writeAsString(data));
 
       var disableSyncFields = json["settings"]["disableSyncFields"] as String;
-      if (disableSyncFields.isNotEmpty){
+      if (disableSyncFields.isNotEmpty) {
         var json4sync = jsonDecode(data);
         List<String> customDisableSync = splitField(disableSyncFields);
         for (var field in customDisableSync) {
@@ -42,7 +42,6 @@ class Appdata with Init {
       }
 
       await Future.wait(futures);
-
     } finally {
       _isSavingData = false;
     }
@@ -98,11 +97,12 @@ class Appdata with Init {
     if (data['settings'] is Map) {
       var settings = data['settings'] as Map<String, dynamic>;
 
-      List<String> customDisableSync = splitField(this.settings["disableSyncFields"] as String);
+      List<String> customDisableSync = splitField(
+        this.settings["disableSyncFields"] as String,
+      );
 
       for (var key in settings.keys) {
-        if (!_disableSync.contains(key) &&
-            !customDisableSync.contains(key)) {
+        if (!_disableSync.contains(key) && !customDisableSync.contains(key)) {
           this.settings[key] = settings[key];
         }
       }
@@ -143,8 +143,6 @@ class Appdata with Init {
       searchHistory = List.from(json['searchHistory']);
     } catch (e) {
       Log.error("Appdata", "Failed to load appdata", e);
-      Log.info("Appdata", "Resetting appdata");
-      file.deleteIgnoreError();
     }
     try {
       var implicitDataFile = File(FilePath.join(dataPath, 'implicitData.json'));
@@ -164,6 +162,22 @@ final appdata = Appdata._create();
 
 class Settings with ChangeNotifier {
   Settings._create();
+
+  static const _integerSettings = {
+    'preloadImageCount',
+    'downloadThreads',
+    'autoPageTurningInterval',
+    'readerScreenPicNumberForLandscape',
+    'readerScreenPicNumberForPortrait',
+  };
+
+  static dynamic _normalizeNumericSetting(String key, dynamic value) {
+    // Older sliders saved these integer settings as JSON doubles.
+    if (_integerSettings.contains(key) && value is double) {
+      return value.round();
+    }
+    return value;
+  }
 
   final _data = <String, dynamic>{
     'comicDisplayMode': 'detailed', // detailed, brief
@@ -226,15 +240,22 @@ class Settings with ChangeNotifier {
     'localFavoritesFirst': true,
     'autoCloseFavoritePanel': false,
     'showChapterComments': true, // show chapter comments in reader
-    'showChapterCommentsAtEnd': false, // show chapter comments at end of chapter
+    'showChapterCommentsAtEnd':
+        false, // show chapter comments at end of chapter
     'enableAnime4K': false, // enable Anime4K super-resolution
     'anime4KScaleFactor': 2.0, // upscale factor (1.0 - 4.0), v1 only
-    'anime4KPushStrength': 0.15, // line refinement strength (0.0 - 1.0), v1 only; 配合边缘保护避免侵蚀细线
-    'anime4KPushGradStrength': 1.0, // gradient refinement strength (0.0 - 1.0), v1 only
-    'anime4KVersion': 'v1', // Anime4K engine version: 'v1' (CPU algorithm) | 'v4' (AI model, GPU)
-    'anime4KV4Intensity': 1.0, // v4 upscale intensity (reserved, currently fixed 1.0)
+    'anime4KPushStrength':
+        0.15, // line refinement strength (0.0 - 1.0), v1 only; 配合边缘保护避免侵蚀细线
+    'anime4KPushGradStrength':
+        1.0, // gradient refinement strength (0.0 - 1.0), v1 only
+    'anime4KVersion': 'v1', // v1 CPU algorithm or v4 AI model
+    'anime4KV4Intensity': 1.0, // AI output contrast, not enhancement strength
+    'anime4KV4OutputScale': 0.0, // 0 follows the validated model's native scale
+    'anime4KEnhancementStrength':
+        1.0, // blend between resized source and enhanced output
+    'imageAiBackend': 'auto', // platform acceleration with CPU fallback, or cpu
     'enableColorization': false, // enable image colorization
-    'colorizationIntensity': 1.0, // colorization intensity (0.3 - 1.2)
+    'colorizationIntensity': 1.0, // color concentration (0.0 - 1.2)
   };
 
   operator [](String key) {
@@ -242,7 +263,14 @@ class Settings with ChangeNotifier {
   }
 
   operator []=(String key, dynamic value) {
-    _data[key] = value;
+    if (key == 'comicSpecificSettings') {
+      for (final readerSettings in (value as Map<String, dynamic>).values) {
+        (readerSettings as Map<String, dynamic>).updateAll(
+          _normalizeNumericSetting,
+        );
+      }
+    }
+    _data[key] = _normalizeNumericSetting(key, value);
     if (key != "dataVersion") {
       notifyListeners();
     }
@@ -281,7 +309,10 @@ class Settings with ChangeNotifier {
     (_data['comicSpecificSettings'] as Map<String, dynamic>).putIfAbsent(
       "$comicId@$sourceKey",
       () => <String, dynamic>{},
-    )[key] = value;
+    )[key] = _normalizeNumericSetting(
+      key,
+      value,
+    );
     notifyListeners();
   }
 

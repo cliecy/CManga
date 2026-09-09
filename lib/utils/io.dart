@@ -27,8 +27,13 @@ class IO {
 class FilePath {
   const FilePath._();
 
-  static String join(String path1, String path2,
-      [String? path3, String? path4, String? path5]) {
+  static String join(
+    String path1,
+    String path2, [
+    String? path3,
+    String? path4,
+    String? path5,
+  ]) {
     return p.join(path1, path2, path3, path4, path5);
   }
 }
@@ -179,7 +184,9 @@ Future<void> copyDirectory(Directory source, Directory destination) async {
 /// Copy the **contents** of the source directory to the destination directory.
 /// This function is executed in an isolate to prevent the UI from freezing.
 Future<void> copyDirectoryIsolate(
-    Directory source, Directory destination) async {
+  Directory source,
+  Directory destination,
+) async {
   await Isolate.run(() => overrideIO(() => copyDirectory(source, destination)));
 }
 
@@ -232,8 +239,9 @@ class DirectoryPicker {
         }
       } else {
         // ios, macos
-        directory =
-            await _methodChannel.invokeMethod<String?>("getDirectoryPath");
+        directory = await _methodChannel.invokeMethod<String?>(
+          "getDirectoryPath",
+        );
       }
       if (directory == null) return null;
       _finalizer.attach(this, directory);
@@ -297,10 +305,12 @@ Future<FileSelectResult?> selectFile({required List<String> ext}) async {
       if (xFile == null) return null;
       file = FileSelectResult(xFile.path);
     }
-    if (!ext.contains(file.path.split(".").last)) {
-      App.rootContext.showMessage(
-        message: "Invalid file type: ${file.path.split(".").last}",
-      );
+    final extension = p
+        .extension(file.path)
+        .replaceFirst('.', '')
+        .toLowerCase();
+    if (!ext.any((allowed) => allowed.toLowerCase() == extension)) {
+      App.rootContext.showMessage(message: "Invalid file type: $extension");
       return null;
     }
     return file;
@@ -328,8 +338,11 @@ Future<String?> selectDirectoryIOS() async {
   return IOSDirectoryPicker.selectDirectory();
 }
 
-Future<void> saveFile(
-    {Uint8List? data, required String filename, File? file}) async {
+Future<void> saveFile({
+  Uint8List? data,
+  required String filename,
+  File? file,
+}) async {
   if (data == null && file == null) {
     throw Exception("data and file cannot be null at the same time");
   }
@@ -394,28 +407,29 @@ final class _IOOverrides extends IOOverrides {
 }
 
 T overrideIO<T>(T Function() f) {
-  return IOOverrides.runWithIOOverrides<T>(
-    f,
-    _IOOverrides(),
-  );
+  return IOOverrides.runWithIOOverrides<T>(f, _IOOverrides());
 }
 
 class Share {
-  static void shareFile({
+  static Future<void> shareFile({
     required Uint8List data,
     required String filename,
     required String mime,
-  }) {
+    required Rect sharePositionOrigin,
+  }) async {
     if (!App.isWindows) {
-      s.Share.shareXFiles(
+      await s.Share.shareXFiles(
         [s.XFile.fromData(data, mimeType: mime)],
         fileNameOverrides: [filename],
+        sharePositionOrigin: sharePositionOrigin,
       );
     } else {
       // write to cache
       var file = File(FilePath.join(App.cachePath, filename));
-      file.writeAsBytesSync(data);
-      s.Share.shareXFiles([s.XFile(file.path)]);
+      await file.writeAsBytes(data, flush: true);
+      await s.Share.shareXFiles([
+        s.XFile(file.path),
+      ], sharePositionOrigin: sharePositionOrigin);
     }
   }
 

@@ -2,70 +2,101 @@ package com.github.kiastr.venera_ssr.colorize
 
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
+import ai.onnxruntime.providers.NNAPIFlags
+import org.json.JSONArray
+import java.io.File
+import java.util.EnumSet
 
-/**
- * 管理 ONNX Runtime 推理会话（session）生命周期。
- * 同一模型路径 + 同一执行后端（NNAPI/CPU）只加载一次并缓存复用
- * （纯 Dart 实现每图重建 session 是性能/稳定性瓶颈）。
- *
- * 移植自 AiColorize（com.kiastr.aicolorize.ModelManager）。
- */
-class ModelManager(private val env: OrtEnvironment) {
+/** Used only by the bridge's serial worker; CPU and NNAPI are never mislabeled. */
+class ModelManager(private val env: OrtEnvironment, private val profileDirectory: File) {
+    class Session(val ort: OrtSession, val requestedNnapi: Boolean) {
+        var backend = "cpu"
+            private set
+        var fallbackReason: String? = null
+            private set
+        private var profiling = requestedNnapi
 
-    // 只为「当前模型路径」缓存多个后端（key = "nnapi" / "cpu"）。
-    //
-    // 旧实现只持有单个 session，同一模型在 NNAPI↔CPU 间切换（超分先试 NNAPI、
-    // 失败回退 CPU）会反复 close + 重新加载 + 重编译计算图，表现为明显卡顿。
-    // 因此这里允许同一模型的多后端并存。
-    //
-    // 但缓存必须限定在单一模型路径内：DeOldify 完整版约 243MB，
-    // 若与超分模型的 session 同时长期驻留会显著抬高常驻内存。
-    // 模型路径变化时释放旧路径的全部 session（与旧实现的释放时机一致）。
-    private var currentPath: String? = null
-    private val sessions = HashMap<String, OrtSession>()
-
-    private fun backendKey(useNnapi: Boolean) = if (useNnapi) "nnapi" else "cpu"
-
-    @Synchronized
-    fun getSession(modelPath: String, useNnapi: Boolean): OrtSession {
-        // 切换模型路径：释放旧模型的所有后端 session，避免多模型常驻内存
-        if (currentPath != modelPath) {
-            releaseAll()
-            currentPath = modelPath
-        }
-
-        val k = backendKey(useNnapi)
-        sessions[k]?.let { return it }
-
-        val opts = OrtSession.SessionOptions()
-        if (useNnapi) {
+        /** Inspect executed nodes, not just the list of registered providers. */
+        fun recordExecution() {
+            if (!profiling) return
+            profiling = false
+            var file: File? = null
             try {
-                // NNAPI 统一抽象 CPU/GPU/NPU；不支持时回退 CPU
-                opts.addNnapi()
+                file = File(ort.endProfiling())
+                val events = JSONArray(file.readText())
+                var nnapi = false
+                var cpu = false
+                for (i in 0 until events.length()) {
+                    val provider = events.optJSONObject(i)?.optJSONObject("args")
+                        ?.optString("provider") ?: continue
+                    if (provider.contains("Nnapi", ignoreCase = true)) nnapi = true
+                    if (provider == "CPUExecutionProvider") cpu = true
+                }
+                backend = if (nnapi) "nnapi" else "cpu"
+                fallbackReason = when {
+                    !nnapi -> "NNAPI did not execute any nodes; ONNX Runtime used CPU."
+                    cpu -> "NNAPI with CPU execution for unsupported operators."
+                    else -> null
+                }
             } catch (e: Exception) {
-                opts.addCPU(true)
+                // The caller must rerun on an explicit CPU session rather than guess.
+                throw IllegalStateException("Cannot verify NNAPI execution: ${e.message}", e)
+            } finally {
+                file?.delete()
             }
-        } else {
-            opts.addCPU(true)
         }
-        val s = env.createSession(modelPath, opts)
-        sessions[k] = s
-        return s
-    }
 
-    private fun releaseAll() {
-        for (s in sessions.values) {
+        fun close() {
             try {
-                s.close()
-            } catch (_: Exception) {
+                if (profiling) File(ort.endProfiling()).delete()
+            } finally {
+                ort.close()
             }
         }
-        sessions.clear()
     }
 
-    @Synchronized
-    fun close() {
-        releaseAll()
-        currentPath = null
+    private data class Key(val path: String, val identity: String, val nnapi: Boolean)
+    private val sessions = LinkedHashMap<Key, Session>(4, 0.75f, true)
+
+    fun getSession(path: String, identity: String, nnapi: Boolean): Session {
+        val obsolete = sessions.keys.filter { it.path == path && it.identity != identity }
+        obsolete.forEach { sessions.remove(it)?.close() }
+        val key = Key(path, identity, nnapi)
+        sessions[key]?.let { return it }
+        // At most two models plus the SR CPU reference session may remain resident.
+        while (sessions.size >= 3) {
+            val eldest = sessions.entries.iterator()
+            eldest.next().value.close()
+            eldest.remove()
+        }
+        val session = OrtSession.SessionOptions().use { options ->
+            options.setExecutionMode(OrtSession.SessionOptions.ExecutionMode.SEQUENTIAL)
+            if (nnapi) {
+                check(profileDirectory.isDirectory || profileDirectory.mkdirs()) {
+                    "Cannot create ONNX profiling directory"
+                }
+                options.addNnapi(EnumSet.of(NNAPIFlags.CPU_DISABLED))
+                options.enableProfiling(File(profileDirectory, "nnapi-${System.nanoTime()}").path)
+            } else {
+                options.addCPU(true)
+            }
+            Session(env.createSession(path, options), nnapi)
+        }
+        sessions[key] = session
+        return session
+    }
+
+    fun discard(path: String, identity: String, nnapi: Boolean) {
+        sessions.remove(Key(path, identity, nnapi))?.close()
+    }
+
+    fun reset(path: String? = null) {
+        val iterator = sessions.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            if (path == null || entry.key.path == path) {
+                try { entry.value.close() } finally { iterator.remove() }
+            }
+        }
     }
 }
