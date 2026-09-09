@@ -22,6 +22,7 @@ jobs:
         with:
           path: build/apple-ort
           key: apple-ort-macos-${{ runner.arch }}-${{ hashFiles('native/apple/build_ort_metal.py', 'native/apple/ort-metal.patch', 'native/apple/VeneraOnnxRuntime.podspec') }}
+          restore-keys: apple-ort-macos-${{ runner.arch }}-
 
       - name: Build native ONNX WebGPU Metal dependency
         run: python3 native/apple/build_ort_metal.py --platform macos

@@ -22,6 +22,7 @@ jobs:
         with:
           path: build/apple-ort
           key: apple-ort-ios-${{ runner.arch }}-${{ hashFiles('native/apple/build_ort_metal.py', 'native/apple/ort-metal.patch', 'native/apple/VeneraOnnxRuntime.podspec') }}
+          restore-keys: apple-ort-ios-${{ runner.arch }}-
 
       - name: Build device and simulator Metal runtime slices
         run: python3 native/apple/build_ort_metal.py --platform ios

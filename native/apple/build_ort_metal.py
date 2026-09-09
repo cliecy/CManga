@@ -126,6 +126,11 @@ def main():
                     "iphonesimulator": ["--ios", "--apple_deploy_target=15.1"],
                 },
             }
+            if platform == "ios":
+                # ORT's iOS toolchain enables ARC globally, but Dawn's .mm
+                # utilities use manual retain/release. ORT explicitly enables
+                # ARC on its own Objective-C sources after these base flags.
+                settings["build_params"]["base"].append("CMAKE_CXX_FLAGS=-fno-objc-arc")
             output.mkdir(parents=True, exist_ok=True)
             settings_path = output / "build-settings.json"
             settings_path.write_text(json.dumps(settings, indent=2) + "\n")
