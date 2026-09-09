@@ -30,6 +30,16 @@ constexpr size_t kMaxEncodedBytes = 64u * 1024u * 1024u;
 constexpr int kTile = 256;
 constexpr int kOverlap = 24;
 
+bool IsNewColor(const std::string& type) {
+  return type == "manga_v2" || type == "manga_light" || type == "ddcolor" || type == "anime_deoldify";
+}
+
+void CheckType(const std::string& type) {
+  if (type != "esrgan" && type != "deoldify" && !IsNewColor(type)) {
+    throw Error("unsupported_type", "Supported types: esrgan, deoldify, manga_v2, manga_light, ddcolor, anime_deoldify.");
+  }
+}
+
 void Check(const OrtApi* api, OrtStatus* status) {
   if (!status) return;
   std::string message = api->GetErrorMessage(status);
@@ -130,7 +140,14 @@ struct Runtime {
 struct Session {
   Runtime& runtime;
   OrtSession* session = nullptr;
-  std::string input_name;
+  struct Input {
+    std::string name;
+    std::vector<int64_t> shape;
+    std::vector<float> zeros;
+  };
+  std::vector<Input> inputs;
+  std::vector<float> input_buffer;
+  int output_channels = 0;
   std::string output_name;
   ModelInfo info;
   std::array<int64_t, 4> output_shape{};
@@ -159,53 +176,130 @@ struct Session {
     }
     OrtOwner<OrtSession> created(nullptr, api->ReleaseSession);
     Check(api, api->CreateSession(runtime.env, Path(file).c_str(), options.ptr, &created.ptr));
-    size_t inputs = 0, outputs = 0;
-    Check(api, api->SessionGetInputCount(created.ptr, &inputs));
-    Check(api, api->SessionGetOutputCount(created.ptr, &outputs));
-    if (inputs != 1 || outputs != 1) throw Error("incompatible_model", "Expected exactly one image input and one image output.");
+    size_t input_count = 0, output_count = 0;
+    Check(api, api->SessionGetInputCount(created.ptr, &input_count));
+    Check(api, api->SessionGetOutputCount(created.ptr, &output_count));
+    const bool light = kind == "manga_light";
+    if (input_count != (light ? 4u : 1u) || output_count != 1) {
+      throw Error("incompatible_model", kind + (light
+          ? " requires four generator inputs and one RGB output (no SAM encoder)."
+          : " requires exactly one image input and one image output."));
+    }
     OrtAllocator* allocator = nullptr;
     Check(api, api->GetAllocatorWithDefaultOptions(&allocator));
-    auto name = [&](bool input) {
+    auto name = [&](bool input, size_t index) {
       char* value = nullptr;
-      Check(api, input ? api->SessionGetInputName(created.ptr, 0, allocator, &value)
-                       : api->SessionGetOutputName(created.ptr, 0, allocator, &value));
+      Check(api, input ? api->SessionGetInputName(created.ptr, index, allocator, &value)
+                       : api->SessionGetOutputName(created.ptr, index, allocator, &value));
       std::string result(value);
       allocator->Free(allocator, value);
       return result;
     };
-    input_name = name(true);
-    output_name = name(false);
-    auto shape = [&](bool input) {
+    auto shape = [&](bool input, size_t index, const std::string& tensor_name) {
       OrtOwner<OrtTypeInfo> type_info(nullptr, api->ReleaseTypeInfo);
-      Check(api, input ? api->SessionGetInputTypeInfo(created.ptr, 0, &type_info.ptr)
-                       : api->SessionGetOutputTypeInfo(created.ptr, 0, &type_info.ptr));
+      Check(api, input ? api->SessionGetInputTypeInfo(created.ptr, index, &type_info.ptr)
+                       : api->SessionGetOutputTypeInfo(created.ptr, index, &type_info.ptr));
       const OrtTensorTypeAndShapeInfo* tensor = nullptr;
       Check(api, api->CastTypeInfoToTensorInfo(type_info.ptr, &tensor));
-      if (!tensor) throw Error("incompatible_model", "Image input/output must be tensors.");
+      if (!tensor) throw Error("incompatible_model", kind + ": " + tensor_name + " must be a tensor.");
       ONNXTensorElementDataType element;
       Check(api, api->GetTensorElementType(tensor, &element));
       if (element != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-        throw Error("incompatible_model", "Expected float32 NCHW image input/output. Int8-weight models with float32 image I/O are supported; raw quantized I/O requires an explicit quantization contract.");
+        throw Error("incompatible_model", kind + ": " + tensor_name +
+            " must have float32 I/O; internal FP16/int8 weights do not imply half/quantized image I/O.");
       }
       size_t rank = 0;
       Check(api, api->GetDimensionsCount(tensor, &rank));
-      if (rank != 4) throw Error("incompatible_model", "Expected rank-four NCHW image tensors.");
-      std::array<int64_t, 4> dims;
+      const size_t expected_rank = light && input && tensor_name == "wd14_embedding" ? 2 : 4;
+      if (rank != expected_rank) throw Error("incompatible_model", kind + ": " + tensor_name +
+          (expected_rank == 2 ? " must be rank-two [1,1024]." : " must be rank-four NCHW."));
+      std::vector<int64_t> dims(rank);
       Check(api, api->GetDimensions(tensor, dims.data(), dims.size()));
-      if (dims[0] > 1) throw Error("incompatible_model", "Only batch-one image models are supported.");
+      if (dims[0] > 1 || std::find(dims.begin(), dims.end(), 0) != dims.end()) {
+        throw Error("incompatible_model", kind + ": " + tensor_name + " must support batch one with nonzero dimensions.");
+      }
       return dims;
     };
-    const auto input = shape(true);
-    output_shape = shape(false);
-    if ((input[1] != 1 && input[1] != 3) ||
-        (kind == "deoldify" && input[1] != 3) ||
-        (output_shape[1] > 0 && output_shape[1] != input[1])) {
-      throw Error("incompatible_model", "Expected ACNet (1 channel), RGB SR (3 channels), or DeOldify (3 channels), with matching output channels.");
+    for (size_t i = 0; i < input_count; ++i) {
+      Input input;
+      input.name = name(true, i);
+      input.shape = shape(true, i, input.name);
+      this->inputs.push_back(std::move(input));
+    }
+    output_name = name(false, 0);
+    const auto output = shape(false, 0, output_name);
+    std::copy(output.begin(), output.end(), output_shape.begin());
+    if (IsNewColor(kind)) {
+      const char* expected_input = light ? "L_bw" : "input";
+      const char* expected_output = light ? "rgb_pred" : kind == "manga_v2" ? "rgb" : "output";
+      auto main = std::find_if(this->inputs.begin(), this->inputs.end(),
+          [&](const Input& input) { return input.name == expected_input; });
+      if (main == this->inputs.end() || output_name != expected_output) {
+        throw Error("incompatible_model", kind + ": expected main input " + expected_input + " and output " + expected_output + ".");
+      }
+      std::iter_swap(this->inputs.begin(), main);
+    }
+    const auto& input = this->inputs.front().shape;
+    const int expected_channels = kind == "manga_v2" ? 5 : light ? 1 : 3;
+    output_channels = kind == "ddcolor" ? 2 : kind == "esrgan" ? static_cast<int>(input[1]) : 3;
+    if ((kind == "esrgan" ? input[1] != 1 && input[1] != 3 : input[1] != expected_channels) ||
+        (IsNewColor(kind) ? output_shape[1] != output_channels
+                          : output_shape[1] > 0 && output_shape[1] != output_channels)) {
+      throw Error("incompatible_model", kind + ": incompatible NCHW input/output channels; expected " +
+          (kind == "esrgan" ? std::string("matching 1 or 3") :
+           std::to_string(expected_channels) + " input and " + std::to_string(output_channels) + " output") + ".");
     }
     info.channels = static_cast<int>(input[1]);
     if (input[2] > 2048 || input[3] > 2048) throw Error("incompatible_model", "Fixed model input exceeds the supported 2048-pixel side.");
     info.input_height = input[2] > 0 ? static_cast<int>(input[2]) : 0;
     info.input_width = input[3] > 0 ? static_cast<int>(input[3]) : 0;
+    if (kind == "manga_v2" || light) {
+      for (size_t axis = 2; axis < 4; ++axis) {
+        if ((input[axis] > 0 && input[axis] != 512) ||
+            (output_shape[axis] > 0 && output_shape[axis] != 512)) {
+          throw Error("incompatible_model", kind + ": fixed image axes must be 512 for the supported inference policy.");
+        }
+      }
+    } else if (kind == "ddcolor") {
+      if (info.input_height != info.input_width || (info.input_width && info.input_width % 32)) {
+        throw Error("incompatible_model", "ddcolor requires dynamic spatial axes or a fixed square side divisible by 32.");
+      }
+      const int side = info.input_width ? info.input_width : 256;
+      for (size_t axis = 2; axis < 4; ++axis) {
+        if (output_shape[axis] > 0 && output_shape[axis] != side) {
+          throw Error("incompatible_model", "ddcolor fixed output dimensions must match the selected input side.");
+        }
+      }
+    } else if (kind == "anime_deoldify") {
+      const std::array<int64_t, 4> expected{1, 3, 256, 256};
+      if (!std::equal(input.begin(), input.end(), expected.begin()) || output_shape != expected) {
+        throw Error("incompatible_model", "anime_deoldify requires fixed float32 input/output [1,3,256,256].");
+      }
+    }
+    if (light) {
+      static constexpr const char* names[] = {"sam_level0", "sam_level1", "wd14_embedding"};
+      const std::array<std::vector<int64_t>, 3> shapes{
+          std::vector<int64_t>{1, 256, 32, 32}, {1, 256, 16, 16}, {1, 1024}};
+      for (size_t i = 0; i < 3; ++i) {
+        auto found = std::find_if(this->inputs.begin() + i + 1, this->inputs.end(),
+            [&](const Input& value) { return value.name == names[i]; });
+        if (found == this->inputs.end()) throw Error("incompatible_model", std::string("manga_light requires input ") + names[i] + ".");
+        std::iter_swap(this->inputs.begin() + i + 1, found);
+        auto& auxiliary = this->inputs[i + 1];
+        size_t count = 1;
+        for (size_t axis = 0; axis < shapes[i].size(); ++axis) {
+          if (auxiliary.shape[axis] > 0 && auxiliary.shape[axis] != shapes[i][axis]) {
+            throw Error("incompatible_model", "manga_light: " + auxiliary.name + " shape is incompatible with 512px zero-semantic mode.");
+          }
+          count *= static_cast<size_t>(shapes[i][axis]);
+        }
+        auxiliary.shape = shapes[i];
+        auxiliary.zeros.resize(count, 0.0f);
+      }
+    }
+    // New color contracts are fully specified by graph metadata. Do not run a
+    // throwaway prediction at inspection time (especially for zero intensity).
+    if (IsNewColor(kind)) validated = true;
     if (kind == "esrgan" && info.input_width && info.input_height &&
         output_shape[2] > 0 && output_shape[3] > 0) {
       SetScale(info.input_width, info.input_height, output_shape[3], output_shape[2]);
@@ -366,26 +460,56 @@ struct Engine::Impl {
   cv::Mat Run(Session& model, const cv::Mat& input) {
     CheckCancelled();
     const auto api = model.runtime.api;
-    const int channels = input.channels();
+    const int channels = model.info.channels;
+    const int supplied_channels = input.channels();
+    if (input.depth() != CV_32F ||
+        supplied_channels != (model.type == "manga_v2" ? 1 : channels) ||
+        (model.info.input_width && input.cols != model.info.input_width) ||
+        (model.info.input_height && input.rows != model.info.input_height)) {
+      throw Error("incompatible_model", model.type + ": prepared input does not match the graph's float32 NCHW shape.");
+    }
     const size_t plane = input.total();
-    std::vector<float> buffer(plane * channels);
-    for (int y = 0; y < input.rows; ++y) {
-      const float* src = input.ptr<float>(y);
-      for (int x = 0; x < input.cols; ++x) {
-        for (int c = 0; c < channels; ++c) buffer[c * plane + y * input.cols + x] = src[x * channels + c];
+    float* input_data = nullptr;
+    if (channels == 1 && input.isContinuous()) {
+      // ORT reads this borrowed tensor synchronously; single-channel inputs
+      // already have planar layout and need no extra image-sized copy.
+      input_data = const_cast<float*>(input.ptr<float>());
+    } else {
+      auto& buffer = model.input_buffer;
+      buffer.resize(plane * channels);
+      if (model.type == "manga_v2") std::fill(buffer.begin() + plane, buffer.end(), 0.0f);
+      for (int y = 0; y < input.rows; ++y) {
+        const float* src = input.ptr<float>(y);
+        for (int x = 0; x < input.cols; ++x) {
+          for (int c = 0; c < supplied_channels; ++c) {
+            buffer[c * plane + y * input.cols + x] = src[x * supplied_channels + c];
+          }
+        }
       }
+      input_data = buffer.data();
     }
     const std::array<int64_t, 4> shape{1, channels, input.rows, input.cols};
     OrtOwner<OrtMemoryInfo> memory(nullptr, api->ReleaseMemoryInfo);
     Check(api, api->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &memory.ptr));
-    OrtOwner<OrtValue> tensor(nullptr, api->ReleaseValue);
-    Check(api, api->CreateTensorWithDataAsOrtValue(memory.ptr, buffer.data(), buffer.size() * sizeof(float),
-                                                 shape.data(), shape.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &tensor.ptr));
+    std::array<OrtOwner<OrtValue>, 4> tensors{{
+        {nullptr, api->ReleaseValue}, {nullptr, api->ReleaseValue},
+        {nullptr, api->ReleaseValue}, {nullptr, api->ReleaseValue}}};
+    std::array<const char*, 4> input_names{};
+    std::array<const OrtValue*, 4> input_values{};
+    for (size_t i = 0; i < model.inputs.size(); ++i) {
+      auto& spec = model.inputs[i];
+      Check(api, api->CreateTensorWithDataAsOrtValue(memory.ptr,
+          i == 0 ? input_data : spec.zeros.data(),
+          (i == 0 ? plane * channels : spec.zeros.size()) * sizeof(float),
+          i == 0 ? shape.data() : spec.shape.data(),
+          i == 0 ? shape.size() : spec.shape.size(),
+          ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &tensors[i].ptr));
+      input_names[i] = spec.name.c_str();
+      input_values[i] = tensors[i].ptr;
+    }
     OrtOwner<OrtRunOptions> run(nullptr, api->ReleaseRunOptions);
     Check(api, api->CreateRunOptions(&run.ptr));
-    const char* input_name = model.input_name.c_str();
     const char* output_name = model.output_name.c_str();
-    const OrtValue* input_value = tensor.ptr;
     OrtOwner<OrtValue> output(nullptr, api->ReleaseValue);
     {
       std::lock_guard<std::mutex> lock(run_mutex);
@@ -393,7 +517,8 @@ struct Engine::Impl {
       active_api = api;
       active_run = run.ptr;
     }
-    OrtStatus* status = api->Run(model.session, run.ptr, &input_name, &input_value, 1, &output_name, 1, &output.ptr);
+    OrtStatus* status = api->Run(model.session, run.ptr, input_names.data(), input_values.data(),
+                                model.inputs.size(), &output_name, 1, &output.ptr);
     {
       std::lock_guard<std::mutex> lock(run_mutex);
       active_run = nullptr;
@@ -406,24 +531,35 @@ struct Engine::Impl {
     Check(api, api->GetTensorTypeAndShape(output.ptr, &dimensions.ptr));
     size_t rank = 0;
     Check(api, api->GetDimensionsCount(dimensions.ptr, &rank));
-    if (rank != 4) throw Error("incompatible_model", "Inference output is not NCHW.");
+    if (rank != 4) throw Error("incompatible_model", model.type + ": inference output is not NCHW.");
+    ONNXTensorElementDataType element;
+    Check(api, api->GetTensorElementType(dimensions.ptr, &element));
+    if (element != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+      throw Error("incompatible_model", model.type + ": inference output must be float32.");
+    }
     std::array<int64_t, 4> output_shape;
     Check(api, api->GetDimensions(dimensions.ptr, output_shape.data(), output_shape.size()));
-    if (output_shape[0] != 1 || output_shape[1] != channels) throw Error("incompatible_model", "Inference output batch/channel mismatch.");
+    const int output_channels = model.output_channels;
+    if (output_shape[0] != 1 || output_shape[1] != output_channels) {
+      throw Error("incompatible_model", model.type + ": inference output batch/channel mismatch.");
+    }
     Pixels(output_shape[3], output_shape[2]);
+    if (IsNewColor(model.type) && (output_shape[2] != input.rows || output_shape[3] != input.cols)) {
+      throw Error("incompatible_model", model.type + ": output spatial dimensions must match the prepared image input.");
+    }
     float* data = nullptr;
     Check(api, api->GetTensorMutableData(output.ptr, reinterpret_cast<void**>(&data)));
     const int width = static_cast<int>(output_shape[3]);
     const int height = static_cast<int>(output_shape[2]);
-    cv::Mat result(height, width, CV_MAKETYPE(CV_32F, channels));
+    cv::Mat result(height, width, CV_MAKETYPE(CV_32F, output_channels));
     const size_t output_plane = result.total();
     for (int y = 0; y < height; ++y) {
       float* dst = result.ptr<float>(y);
       for (int x = 0; x < width; ++x) {
-        for (int c = 0; c < channels; ++c) {
+        for (int c = 0; c < output_channels; ++c) {
           const float value = data[c * output_plane + y * width + x];
           if (!std::isfinite(value)) throw Error("inference_failed", "Model produced non-finite pixels.");
-          dst[x * channels + c] = value;
+          dst[x * output_channels + c] = value;
         }
       }
     }
@@ -432,7 +568,7 @@ struct Engine::Impl {
 
   Session& GetSession(const std::string& path, const std::string& type,
                       const std::string& model_id, bool dml) {
-    if (type != "esrgan" && type != "deoldify") throw Error("unsupported_type", "Only esrgan and deoldify are supported.");
+    CheckType(type);
     const std::string file_identity = KeyPart(FileIdentity(path));
     const std::string suffix = KeyPart(type) + (dml ? "dml" : "cpu");
     const std::string metadata_identity = file_identity + KeyPart(type);
@@ -467,9 +603,10 @@ struct Engine::Impl {
         throw Error("incompatible_model", "DeOldify image output must match its fixed input dimensions.");
       }
       session->validated = true;
-      metadata.push_front({metadata_identity, path, session->info});
-      while (metadata.size() > 16) metadata.pop_back();
     }
+    metadata.remove_if([&](const Metadata& entry) { return entry.identity == metadata_identity; });
+    metadata.push_front({metadata_identity, path, session->info});
+    while (metadata.size() > 16) metadata.pop_back();
     sessions.push_front(std::move(session));
     return *sessions.front();
   }
@@ -529,6 +666,7 @@ struct Engine::Impl {
   }
 
   cv::Mat Colorize(Session& session, const cv::Mat& bgr) {
+    if (IsNewColor(session.type)) return ColorizeModern(session, bgr);
     cv::Mat gray, input;
     cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
     cv::cvtColor(gray, input, cv::COLOR_GRAY2RGB);
@@ -550,6 +688,69 @@ struct Engine::Impl {
     cv::Mat chroma;
     cv::merge(std::vector<cv::Mat>{planes[1], planes[2]}, chroma);
     return chroma;  // Float a/b, no intensity multiplication or PNG roundtrip in the cache.
+  }
+
+  cv::Mat ColorizeModern(Session& session, const cv::Mat& bgr) {
+    cv::Mat input;
+    cv::Size content;
+    if (session.type == "manga_v2") {
+      // The upstream generator takes the first RGB channel, not a weighted
+      // grayscale conversion. All four hint/mask planes are supplied as zero.
+      cv::extractChannel(bgr, input, 2);
+      const double ratio = 512.0 / std::max(bgr.cols, bgr.rows);
+      content = cv::Size(std::max(32, static_cast<int>(std::lround(bgr.cols * ratio))),
+                         std::max(32, static_cast<int>(std::lround(bgr.rows * ratio))));
+      cv::resize(input, input, content, 0, 0, cv::INTER_LINEAR);
+      const int width = session.info.input_width ? session.info.input_width : (content.width + 31) / 32 * 32;
+      const int height = session.info.input_height ? session.info.input_height : (content.height + 31) / 32 * 32;
+      cv::copyMakeBorder(input, input, 0, height - content.height, 0, width - content.width,
+                         cv::BORDER_CONSTANT, cv::Scalar(255));
+      input.convertTo(input, CV_32F, 1.0 / 255.0);
+    } else if (session.type == "anime_deoldify") {
+      // Approximate the upstream PIL resize -> LA -> RGB order with OpenCV.
+      // The converted graph owns its learned mean/std normalization.
+      cv::resize(bgr, input, cv::Size(256, 256), 0, 0, cv::INTER_LINEAR);
+      cv::cvtColor(input, input, cv::COLOR_BGR2GRAY);
+      cv::cvtColor(input, input, cv::COLOR_GRAY2RGB);
+      input.convertTo(input, CV_32F);
+    } else {
+      cv::cvtColor(bgr, input, cv::COLOR_BGR2GRAY);
+      if (session.type == "manga_light") {
+        cv::resize(input, input, cv::Size(512, 512), 0, 0, cv::INTER_AREA);
+        input.convertTo(input, CV_32F, 1.0 / 127.5, -1.0);
+      } else {
+        // FaceFusion DDColor preprocessing: gray RGB -> neutral float Lab ->
+        // RGB, then resize. The graph performs its own input normalization.
+        cv::cvtColor(input, input, cv::COLOR_GRAY2RGB);
+        input.convertTo(input, CV_32F, 1.0 / 255.0);
+        cv::cvtColor(input, input, cv::COLOR_RGB2Lab);
+        for (int y = 0; y < input.rows; ++y) {
+          auto* row = input.ptr<cv::Vec3f>(y);
+          for (int x = 0; x < input.cols; ++x) row[x][1] = row[x][2] = 0;
+        }
+        cv::cvtColor(input, input, cv::COLOR_Lab2RGB);
+        const int side = session.info.input_width ? session.info.input_width : 256;
+        cv::resize(input, input, cv::Size(side, side), 0, 0, cv::INTER_LINEAR);
+      }
+    }
+    cv::Mat prediction = Run(session, input);
+    cv::Mat chroma;
+    if (session.type == "ddcolor") {
+      chroma = std::move(prediction);  // Raw float Lab a/b, never RGB or offset by 128.
+    } else {
+      if (session.type == "manga_v2") prediction = prediction(cv::Rect(cv::Point(), content));
+      else if (session.type == "anime_deoldify") prediction.convertTo(prediction, CV_32F, 1.0 / 255.0);
+      else prediction.convertTo(prediction, CV_32F, .5, .5);
+      cv::max(prediction, 0, prediction);
+      cv::min(prediction, 1, prediction);
+      cv::Mat lab;
+      cv::cvtColor(prediction, lab, cv::COLOR_RGB2Lab);
+      chroma.create(lab.size(), CV_32FC2);
+      const int mapping[] = {1, 0, 2, 1};
+      cv::mixChannels(&lab, 1, &chroma, 1, mapping, 2);
+    }
+    if (chroma.size() != bgr.size()) cv::resize(chroma, chroma, bgr.size(), 0, 0, cv::INTER_LINEAR);
+    return chroma;  // Cache unscaled chroma so concentration changes never rerun the model.
   }
 
   Base Infer(const Request& request, const Decoded& image, bool dml) {
@@ -605,6 +806,22 @@ struct Engine::Impl {
   }
 
   cv::Mat RenderColor(const Request& request, const Decoded& image, const Base* base) {
+    if (IsNewColor(request.type)) {
+      cv::Mat lab, result;
+      image.bgr.convertTo(lab, CV_32F, 1.0 / 255.0);
+      cv::cvtColor(lab, lab, cv::COLOR_BGR2Lab);
+      const float intensity = static_cast<float>(request.intensity);
+      for (int y = 0; y < lab.rows; ++y) {
+        auto* row = lab.ptr<cv::Vec3f>(y);
+        const auto* chroma = intensity == 0 ? nullptr : base->pixels.ptr<cv::Vec2f>(y);
+        for (int x = 0; x < lab.cols; ++x) {
+          row[x][1] = chroma ? chroma[x][0] * intensity : 0;
+          row[x][2] = chroma ? chroma[x][1] * intensity : 0;
+        }
+      }
+      cv::cvtColor(lab, result, cv::COLOR_Lab2BGR);
+      return result;
+    }
     cv::Mat luminance;
     cv::extractChannel(image.bgr, luminance, 0);
     luminance.convertTo(luminance, CV_32F, 100.0 / 255.0);
@@ -651,7 +868,7 @@ ModelInfo Engine::GetModelInfo(const std::string& path, const std::string& type)
 
 Result Engine::Process(const Request& request) {
   impl_->CheckCancelled();
-  if (request.type != "esrgan" && request.type != "deoldify") throw Error("unsupported_type", "Only esrgan and deoldify are supported.");
+  CheckType(request.type);
   if (request.backend != "auto" && request.backend != "cpu") throw Error("invalid_arguments", "backend must be auto or cpu.");
   if (!std::isfinite(request.intensity) || !std::isfinite(request.strength) || !std::isfinite(request.output_scale) ||
       request.intensity < (request.type == "esrgan" ? .3 : 0) || request.intensity > 1.2 ||

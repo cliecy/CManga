@@ -13,7 +13,7 @@ All running locally
 
 **黑白漫画上色**
 **Black and white cartoon coloring**
-（正在 feature/colorization 分支测试本地 AI 实时黑白漫画上色功能的**更多可选模型**）
+（Windows / Android 已接入多种本地上色模型；模型来源、限制与验证范围见下文）
 
 **支持webdav同步**
 
@@ -30,14 +30,38 @@ Cartoon embedded text translation function**
 
 ### Windows / Android 本地 AI 图像处理
 
-- 在“设置 → Anime4K”选择 **v4 (AI)**。内置 ACNet 为 2× 亮度超分；可下载/导入兼容的 Real-ESRGAN RGB 模型。v1 是独立的传统算法，不再作为 AI 失败时的静默回退。
+- 在“设置 → Anime4K”选择 **v4 (AI)**。内置 ACNet 为 2× 亮度超分；可选轻量动画 Real-ESRGAN 4×，以及通用 **RealESRGAN-x2plus / x4plus**（各约 67 MB，SceneWorks ONNX 导出）。后两者是较慢、内存占用更高的 23-block RRDB 模型，并非漫画专用，GAN 可能重绘细节；x4plus 不是 x4plus-anime-6B。v1 是独立的传统算法，不作为 AI 失败时的静默回退。
 - **最终输出倍率**默认跟随模型，也可在 1× 至模型原生倍率之间设置：滑块步进 0.05×，数字输入精度 0.01×，例如 1.30×、1.75×。结果尺寸按进入超分阶段的原图尺寸四舍五入。
 - **超分强度**为 0–100%，步进 1%。0% 仅做基础缩放，100% 使用完整增强结果；它不改变倍率，也不是高级设置中的“输出对比度”。v1 同样支持独立强度。
-- 在“设置 → 上色”下载或导入兼容 DeOldify Artistic/轻量 int8 ONNX 模型。**颜色浓度**独立控制 0–120%，步进 1%；100% 为模型预测色度，120% 额外增艳。0% 生成中性色度，不保证逐字节还原原图；关闭功能才完全跳过上色。不支持任意 ONNX/DDColor 模型。
-- Windows 的 **Auto** 优先尝试 DirectML，模型或设备不兼容时明确报告 CPU 回退；也可指定 CPU。Android 上色沿用 CPU 策略。界面显示最近一次 AI 操作的实际后端、缓存命中和失败原因。
+- 在“设置 → 上色”先选择模型，再下载或导入该模型契约兼容的 ONNX；各模型独立安装、替换、恢复和删除，不是任意 ONNX 自动识别器。**颜色浓度**独立控制 0–120%，步进 1%；100% 为模型预测色度，120% 额外增艳。0% 生成中性色度，不保证逐字节还原原图；关闭功能才完全跳过上色。
+- Windows 的 **Auto** 优先尝试 DirectML，模型或设备不兼容时明确报告同一模型的 CPU 回退；也可指定 CPU。Android 上色沿用 CPU 策略。后端可用不等于每个模型、每个算子均在 GPU 运行，不保证所有显卡加速。
 - 两项功能同时开启时顺序为“超分 → 上色”。全局和漫画专属设置遵循现有优先级；调参后刷新当前图片。基础推理结果有界缓存，缓存仍在时，纯倍率/强度/对比度调整不重复执行对应模型；上游像素变化会正确重算下游上色。
 - AI 只在 Windows、Android 接入。失败时保留可阅读图片并提示原因，不显示虚假的 AI 成功。原生处理设有内存与像素上限；Windows 单阶段输入及模型原生输出上限为 24×1024×1024 像素，超限会报错而非擅自降低倍率。
-- Windows 发布包包含所需 AI 运行库，不需要 Python、CUDA 或手工安装 ONNX Runtime。上色模型不随包分发，首次下载/导入后可离线使用。
+- Windows 发布包按构建规则携带所需 AI 运行库，不需要 Python、CUDA 或手工安装 ONNX Runtime。上色模型不随包分发，首次下载/导入后可离线使用；干净 Windows 虚拟机安装/启动仍未验证。
+
+#### 上色模型与来源
+
+| 选择 | 文件体积 / 输入输出约定 | 来源与限制 |
+| --- | --- | --- |
+| DeOldify Artistic / int8 | 标准版约 243 MiB；int8 为实验性轻量变体，仍需兼容 RGB 包装 | 保留现有 DeOldify 管线；[标准 ONNX](https://github.com/instant-high/deoldify-onnx)、[int8 发布](https://github.com/Kiastr/AiColorize/releases/tag/models)。再分发前核对发布者及上游许可。 |
+| AnimeColorDeOldify (`anime_deoldify`) | 约 423 MB；固定 256×256、float32 RGB 0–255 | 来自 [Dakini Grayscale2Color](https://github.com/Dakini/AnimeColorDeOldify) 的原始权重转换，[项目 ONNX 发布及转换来源说明](https://github.com/cliecy/Venera-SSR/releases/tag/image-ai-models-20260909)。Dakini 声明其训练权重为 MIT；应用保留原图 Lab 亮度、透明度与尺寸，不是上游 YUV 滤镜的逐像素复刻。 |
+| DDColor Artistic (`ddcolor`) | 约 980 MB；256×256 中性 Lab 转 RGB 输入，输出两通道 Lab ab | [FaceFusion ONNX](https://huggingface.co/facefusion/models-3.0.0)；[DDColor 上游](https://github.com/piddnad/DDColor) 为 Apache-2.0，FaceFusion 聚合仓库未单独声明该导出许可。支持这一明确契约，不代表任意 DDColor 导出均兼容。 |
+| Manga Light (`manga_light`) | 约 191 MB；512×512 灰度，generator-only | [sharky172 发布](https://huggingface.co/sharky172/manga-light-colorizer)，CC BY-NC-SA 4.0：署名、仅非商业、衍生作品同许可；下载前须确认，导入也须遵守许可。仅运行生成器，SAM 特征和 WD14 嵌入填零，**不运行分割或标签语义引导**，不等同完整上游管线。 |
+| Manga Colorization v2 (`manga_v2`) | 约 61 MB；五通道输入，提示/掩码置零，长边适配 512 并补齐至 32 的倍数 | **仅本地导入，无内置下载**。[Faridzar ONNX](https://huggingface.co/Faridzar/manga-colorization-v2-onnx) 标注 MIT，但 [qweasdd 上游权重](https://github.com/qweasdd/manga-colorization-v2) 许可未核实，商业使用及再分发未获澄清。 |
+
+文件体积不是运行内存需求：模型会话、激活、原生倍率输出和图像缓存还会占用 RAM/显存，DDColor 尤其重；4× 超分原生输出有 16 倍像素，即使最终选较小倍率，也不能据此假定推理内存同步降低。超限会明确失败，建议低内存设备先用 ACNet 或较轻模型。Pix2Pix 缺少已核实的官方训练权重，未实现为可用模型选项。
+
+超分来源：[Anime4KCPP / ACNet](https://github.com/TianZerL/Anime4KCPP)、[Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN)、[SceneWorks 固定版本 ONNX](https://huggingface.co/SceneWorks/real-esrgan-onnx/tree/09f741bac80a246b407da3ee902bf5f3291b602f)。Real-ESRGAN 为 BSD-3-Clause，分发时保留版权、许可与免责声明。设置页展示各模型的来源、许可及输入输出要求；改文件名不能转换模型协议。
+
+#### 保存、导出与逐页信息
+
+- 阅读器的**保存、分享、复制图片默认使用当前有效设置下的处理结果**，不是下载缓存中的原图；按“自定义处理（若开启）→ 超分 → 上色”执行。任何已启用 AI 阶段失败时，阅读可保留可用图片，但显式导出会报错，不把原图或部分结果冒充完整处理结果。
+- 对本地/已下载的 `file://` 源页，成功的处理阶段自动在源页同级的隐藏分类目录 `.venera-processed/` 中保存 PNG：`super_resolution`（超分）、`colorization`（仅成功上色）、`super_resolution_colorization`（超分后上色）。下层按原文件名和结果内容哈希组织，同一结果复用、不同结果并存；**不覆盖原图或旧结果**。两阶段均成功时保留超分中间图与最终组合图。写入失败在逐页信息中记录，不妨碍阅读，也不声称保存成功；在线页不会自动写到漫画目录。
+- 隐藏处理目录不会作为源页/章节重新扫描，避免重复处理或污染导入。普通漫画下载仍保留原始页面，不会自动把整本书替换为 AI 结果。
+- 用户明确选择 **CBZ / EPUB / PDF 整书导出**时，按当前全局/漫画专属设置处理已下载章节及封面，再从临时输出生成文件；不要求先逐页翻阅，不打包 `.venera-processed` 的历史版本。任一启用阶段失败则终止导出，不静默混入原图。
+- 阅读器“图像信息”列出当前章节每页并支持跳转，突出当前可见页。记录实际解码的原始尺寸、超分前后尺寸、最终尺寸/编码大小，以及每阶段状态、实际后端、缓存/执行信息、耗时、错误和本地结果路径。尚未加载、处理中、失败/不完整、取消及旧设置待刷新会分别标示；不会把请求倍率推算值或别页的最近操作当成本页实测结果。
+
+验证边界：本次 Windows 四条新增上色管线的样图输出与独立 Python 参考最大像素差不超过 1/255；Android 四个新增上色模型及 x2plus/x4plus 两个超分模型已验证 CPU 强度 0 / 1 / 0.35 和缓存路径。这不是所有图片、GPU 或内存条件的保证；干净 Windows 环境、ARM64 实机及未支持平台运行仍不能据此宣称通过。实现与验收记录见 [Windows AI 接入计划](doc/windows_ai_plan.md)。
 
 ## 界面展示 (Screenshots)
 

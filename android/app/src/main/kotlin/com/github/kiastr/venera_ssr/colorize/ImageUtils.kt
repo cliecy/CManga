@@ -20,21 +20,35 @@ object ImageUtils {
     /** Bitmap(ARGB_8888) -> OpenCV BGR Mat(uint8) */
     fun bitmapToBgrMat(bitmap: Bitmap): Mat {
         val rgba = Mat()
-        Utils.bitmapToMat(bitmap, rgba, true) // Read straight RGBA, including translucent input.
         val bgr = Mat()
-        Imgproc.cvtColor(rgba, bgr, Imgproc.COLOR_RGBA2BGR)
-        rgba.release()
-        return bgr
+        try {
+            Utils.bitmapToMat(bitmap, rgba, true) // Read straight RGBA, including translucent input.
+            Imgproc.cvtColor(rgba, bgr, Imgproc.COLOR_RGBA2BGR)
+            return bgr
+        } catch (error: Throwable) {
+            bgr.release()
+            throw error
+        } finally {
+            rgba.release()
+        }
     }
 
     /** OpenCV BGR Mat -> Bitmap(ARGB_8888) */
     fun bgrMatToBitmap(bgr: Mat): Bitmap {
         val rgba = Mat()
-        Imgproc.cvtColor(bgr, rgba, Imgproc.COLOR_BGR2RGBA)
-        val bmp = Bitmap.createBitmap(bgr.width(), bgr.height(), Bitmap.Config.ARGB_8888)
-        Utils.matToBitmap(rgba, bmp)
-        rgba.release()
-        return bmp
+        try {
+            Imgproc.cvtColor(bgr, rgba, Imgproc.COLOR_BGR2RGBA)
+            val bmp = Bitmap.createBitmap(bgr.width(), bgr.height(), Bitmap.Config.ARGB_8888)
+            try {
+                Utils.matToBitmap(rgba, bmp)
+                return bmp
+            } catch (error: Throwable) {
+                bmp.recycle()
+                throw error
+            }
+        } finally {
+            rgba.release()
+        }
     }
 
     /**
@@ -82,8 +96,13 @@ object ImageUtils {
             }
         }
         val mat = Mat(h, w, CvType.CV_32FC(c))
-        mat.put(0, 0, hwc) // HWC 交错顺序
-        return mat
+        try {
+            mat.put(0, 0, hwc) // HWC 交错顺序
+            return mat
+        } catch (error: Throwable) {
+            mat.release()
+            throw error
+        }
     }
 
     /** Preserve source alpha without changing the color pipeline's historical luminance. */

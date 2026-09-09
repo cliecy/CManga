@@ -23,14 +23,20 @@ class Anime4KV4Service {
 
   Future<void> init() async {
     if (!await _ai.init()) return;
-    await Anime4KV4ModelManager.setSelectedModelId(
+    final id = Anime4KV4ModelManager.migrateModelId(
       appdata.settings['anime4KV4Model'] as String? ?? 'anime4k_acnet',
     );
+    if (appdata.settings['anime4KV4Model'] != id) {
+      appdata.settings['anime4KV4Model'] = id;
+      await appdata.saveData();
+    }
+    await Anime4KV4ModelManager.setSelectedModelId(id);
     await Anime4KV4ModelManager.extractBundledModelIfNeeded();
     await checkModelAvailable();
   }
 
   Future<void> setModel(String id) async {
+    id = Anime4KV4ModelManager.migrateModelId(id);
     if (!Anime4KV4ModelManager.isValidModelId(id)) return;
     _modelInfo = null;
     _modelPath = null;
@@ -75,31 +81,48 @@ class Anime4KV4Service {
     double outputScale = 0.0,
     double strength = 1.0,
     String backend = 'auto',
+    void Function(ImageAiStatus)? onStatus,
   }) async {
+    var reportedFailure = false;
     try {
-      if (!await _ai.init()) return null;
-      final modelPath = await Anime4KV4ModelManager.ensureModelAvailable();
+      if (!await _ai.init()) {
+        throw UnsupportedError(
+          _ai.capabilities['reason']?.toString() ?? 'AI backend unavailable',
+        );
+      }
+      final model = Anime4KV4ModelManager.selectedDef;
+      final modelPath = await Anime4KV4ModelManager.ensureModelAvailable(
+        model: model,
+      );
       if (modelPath == null) {
         throw StateError('Super-resolution model is not installed');
       }
       final info = await _ai.getModelInfo(modelPath, 'esrgan');
       _modelPath = modelPath;
       _modelInfo = info;
-      final result = await _ai.process({
-        'imageBytes': imageBytes,
-        'modelPath': modelPath,
-        'type': 'esrgan',
-        'backend': backend,
-        'intensity': intensity,
-        'strength': strength,
-        'outputScale': outputScale,
-      });
+      final result = await _ai.process(
+        {
+          'imageBytes': imageBytes,
+          'modelPath': modelPath,
+          'type': 'esrgan',
+          'backend': backend,
+          'intensity': intensity,
+          'strength': strength,
+          'outputScale': outputScale,
+        },
+        onStatus: (value) {
+          reportedFailure = value.isError;
+          onStatus?.call(value);
+        },
+      );
       return result['imageBytes'] as Uint8List;
     } catch (error) {
+      if (reportedFailure) return null;
       _ai.reportError(
         error,
         operation: 'Super-resolution failed; page not enhanced',
       );
+      onStatus?.call(_ai.status.value);
       return null;
     }
   }

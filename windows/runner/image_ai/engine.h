@@ -20,7 +20,7 @@ class Error : public std::runtime_error {
 
 struct Capabilities {
   bool supported = true;
-  std::vector<std::string> types{"esrgan", "deoldify"};
+  std::vector<std::string> types{"esrgan", "deoldify", "manga_v2", "manga_light", "ddcolor", "anime_deoldify"};
   std::vector<std::string> backends{"cpu"};
   std::string reason;
 };

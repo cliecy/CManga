@@ -371,7 +371,8 @@ class _GalleryModeState extends State<_GalleryMode>
         ),
         onPageChanged: (i) {
           if (i == 0) {
-            if (reader.isFirstChapterOfGroup || !reader.toPrevChapter(toLastPage: true)) {
+            if (reader.isFirstChapterOfGroup ||
+                !reader.toPrevChapter(toLastPage: true)) {
               controller.jumpToPage(1);
             }
           } else if (i == totalPages + 1) {
@@ -419,7 +420,7 @@ class _GalleryModeState extends State<_GalleryMode>
             image: _createImageProviderFromKey(
               images[0],
               context,
-              startIndex + 1,
+              startIndex + (reverse ? 2 : 1),
             ),
             fit: BoxFit.contain,
             alignment: axis == Axis.vertical
@@ -436,7 +437,7 @@ class _GalleryModeState extends State<_GalleryMode>
             image: _createImageProviderFromKey(
               images[1],
               context,
-              startIndex + 2,
+              startIndex + (reverse ? 1 : 2),
             ),
             fit: BoxFit.contain,
             alignment: axis == Axis.vertical
@@ -448,12 +449,12 @@ class _GalleryModeState extends State<_GalleryMode>
         ),
       ];
     } else {
-      imageWidgets = images.map((imageKey) {
-        startIndex++;
+      imageWidgets = images.indexed.map((entry) {
+        final (index, imageKey) = entry;
         ImageProvider imageProvider = _createImageProviderFromKey(
           imageKey,
           context,
-          startIndex,
+          startIndex + (reverse ? images.length - index : index + 1),
         );
         return Expanded(
           child: ComicImage(
@@ -594,20 +595,7 @@ class _GalleryModeState extends State<_GalleryMode>
   }
 
   @override
-  Future<Uint8List?> getImageByOffset(Offset offset) async {
-    var imageKey = getImageKeyByOffset(offset);
-    if (imageKey == null) return null;
-    if (imageKey.startsWith("file://")) {
-      return await File(imageKey.substring(7)).readAsBytes();
-    } else {
-      return (await CacheManager().findCache(
-        "$imageKey@${context.reader.type.sourceKey}@${context.reader.cid}@${context.reader.eid}",
-      ))!.readAsBytes();
-    }
-  }
-
-  @override
-  String? getImageKeyByOffset(Offset offset) {
+  ReaderImageProvider? getImageProviderByOffset(Offset offset) {
     var range = getCurrentPageImageRange();
     if (range == null) return null;
 
@@ -615,21 +603,20 @@ class _GalleryModeState extends State<_GalleryMode>
     int actualImageCount = endIndex - startIndex;
 
     if (actualImageCount == 1) {
-      return reader.images![startIndex];
+      return _createImageProvider(startIndex + 1, context);
     }
 
     for (var imageState in imageStates) {
       if ((imageState as _ComicImageState).containsPoint(offset)) {
-        var imageKey =
-            (imageState.widget.image as ReaderImageProvider).imageKey;
-        int index = reader.images!.indexOf(imageKey);
+        var provider = imageState.widget.image as ReaderImageProvider;
+        int index = provider.page - 1;
         if (index >= startIndex && index < endIndex) {
-          return imageKey;
+          return provider;
         }
       }
     }
 
-    return reader.images![startIndex];
+    return _createImageProvider(startIndex + 1, context);
   }
 }
 
@@ -1178,31 +1165,18 @@ class _ContinuousModeState extends State<_ContinuousMode>
   }
 
   @override
-  Future<Uint8List?> getImageByOffset(Offset offset) async {
-    var imageKey = getImageKeyByOffset(offset);
-    if (imageKey == null) return null;
-    if (imageKey.startsWith("file://")) {
-      return await File(imageKey.substring(7)).readAsBytes();
-    } else {
-      return (await CacheManager().findCache(
-        "$imageKey@${context.reader.type.sourceKey}@${context.reader.cid}@${context.reader.eid}",
-      ))!.readAsBytes();
-    }
-  }
-
-  @override
-  String? getImageKeyByOffset(Offset offset) {
-    String? imageKey;
+  ReaderImageProvider? getImageProviderByOffset(Offset offset) {
+    ReaderImageProvider? provider;
     for (var imageState in imageStates) {
       if ((imageState as _ComicImageState).containsPoint(offset)) {
-        imageKey = (imageState.widget.image as ReaderImageProvider).imageKey;
+        provider = imageState.widget.image as ReaderImageProvider;
       }
     }
-    return imageKey;
+    return provider;
   }
 }
 
-ImageProvider _createImageProviderFromKey(
+ReaderImageProvider _createImageProviderFromKey(
   String imageKey,
   BuildContext context,
   int page,
@@ -1210,14 +1184,14 @@ ImageProvider _createImageProviderFromKey(
   var reader = context.reader;
   return ReaderImageProvider(
     imageKey,
-    reader.type.comicSource?.key,
+    reader.type.sourceKey,
     reader.cid,
     reader.eid,
-    reader.page,
+    page,
   );
 }
 
-ImageProvider _createImageProvider(int page, BuildContext context) {
+ReaderImageProvider _createImageProvider(int page, BuildContext context) {
   var reader = context.reader;
   var imageKey = reader.images![page - 1];
   return _createImageProviderFromKey(imageKey, context, page);
@@ -1234,7 +1208,7 @@ void _precacheImage(int page, BuildContext context) {
 }
 
 /// [_preDownloadImage] is used to download the image for the given page.
-/// The image is downloaded using the [CacheManager] and saved to the local storage.
+/// The image is downloaded using [ImageDownloader] and saved to the local storage.
 void _preDownloadImage(int page, BuildContext context) {
   if (page <= 0 || page > context.reader.images!.length) {
     return;

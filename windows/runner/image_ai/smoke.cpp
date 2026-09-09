@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iterator>
 #include <iostream>
 #include <map>
 #include <sstream>
@@ -126,8 +127,14 @@ int Run(const std::vector<std::string>& arguments) {
   std::map<std::string, std::string> options;
   for (size_t i = 1; i < arguments.size(); i += 2) {
     if (i + 1 >= arguments.size() || arguments[i].rfind("--", 0) != 0) {
-      throw std::runtime_error("Usage: venera_image_ai_smoke --model PATH --image PATH --output PATH --type esrgan|deoldify [--backend cpu|auto] [--scale 1.3] [--strength 1] [--intensity 1] [--renders 3] [--check-strength true]");
+      throw std::runtime_error("Usage: venera_image_ai_smoke --model PATH --image PATH --output PATH --type esrgan|deoldify|manga_v2|manga_light|ddcolor|anime_deoldify [--backend cpu|auto] [--scale 1.3] [--strength 1] [--intensity 1] [--renders 3] [--check-strength true|false (esrgan only)]. Color intensity is 0..1.2; all color types retain input dimensions and alpha.");
     }
+    static constexpr const char* keys[] = {"--model", "--image", "--output", "--type", "--backend",
+        "--scale", "--strength", "--intensity", "--renders", "--check-strength"};
+    if (std::find(std::begin(keys), std::end(keys), arguments[i]) == std::end(keys)) {
+      throw std::runtime_error("Unknown option: " + arguments[i]);
+    }
+    if (options.count(arguments[i])) throw std::runtime_error("Duplicate option: " + arguments[i]);
     options[arguments[i]] = arguments[i + 1];
   }
   auto required = [&](const char* key) -> std::string {
@@ -142,6 +149,18 @@ int Run(const std::vector<std::string>& arguments) {
   image_ai::Request request;
   request.model_path = required("--model");
   request.type = required("--type");
+  const auto supported_types = image_ai::Capabilities{}.types;
+  if (std::find(supported_types.begin(), supported_types.end(), request.type) == supported_types.end()) {
+    throw std::runtime_error("--type must be esrgan, deoldify, manga_v2, manga_light, ddcolor, or anime_deoldify.");
+  }
+  const std::string check_strength_option = optional("--check-strength", "false");
+  if (check_strength_option != "true" && check_strength_option != "false") {
+    throw std::runtime_error("--check-strength must be true or false.");
+  }
+  const bool check_strength = check_strength_option == "true";
+  if (check_strength && request.type != "esrgan") {
+    throw std::runtime_error("--check-strength requires esrgan; color models use --intensity, not SR blend strength.");
+  }
   request.backend = optional("--backend", "cpu");
   request.output_scale = std::stod(optional("--scale", "0"));
   request.strength = std::stod(optional("--strength", "1"));
@@ -181,7 +200,7 @@ int Run(const std::vector<std::string>& arguments) {
     output.write(reinterpret_cast<const char*>(result.image_bytes.data()), result.image_bytes.size());
     output.close();
     if (!output) throw std::runtime_error("Cannot write output PNG.");
-    std::cout << "{\"render\":" << render << ",\"backend\":" << Json(result.backend)
+    std::cout << "{\"render\":" << render << ",\"type\":" << Json(request.type) << ",\"backend\":" << Json(result.backend)
               << ",\"width\":" << decoded.cols << ",\"height\":" << decoded.rows
               << ",\"inputWidth\":" << original.cols << ",\"inputHeight\":" << original.rows
               << ",\"scale\":" << result.scale << ",\"outputScale\":" << request.output_scale
@@ -193,8 +212,7 @@ int Run(const std::vector<std::string>& arguments) {
               << ",\"fallbackReason\":" << (result.fallback_reason.empty() ? "null" : Json(result.fallback_reason))
               << ",\"output\":" << Json(destination.u8string()) << "}" << std::endl;
   }
-  if (optional("--check-strength", "false") == "true") {
-    if (request.type != "esrgan") throw std::runtime_error("--check-strength requires esrgan");
+  if (check_strength) {
     request.intensity = original_intensity;
     std::array<cv::Mat, 3> images;
     constexpr double strengths[] = {0, 1, .5};

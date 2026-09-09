@@ -11,6 +11,7 @@ import org.opencv.core.CvType
 import org.opencv.core.Mat
 import org.opencv.core.Rect
 import org.opencv.core.Size
+import org.opencv.core.Scalar
 import org.opencv.imgproc.Imgproc
 import java.io.Closeable
 import java.io.File
@@ -74,9 +75,14 @@ class ColorizeEngine(profileDirectory: File) {
     }
 
     private fun inspect(key: ModelKey): ModelInfo {
-        require(key.type == "esrgan" || key.type == "deoldify") { "Unsupported model type: ${key.type}" }
+        require(key.type in SUPPORTED_TYPES) { "Unsupported model type: ${key.type}" }
         metadata[key]?.let { return it }
         val session = models.getSession(key.path, key.identity, false).ort
+        if (key.type in MODERN_COLOR_TYPES) {
+            val info = inspectColor(session, key.type)
+            rememberMetadata(key, info)
+            return info
+        }
         require(session.numInputs == 1L && session.numOutputs == 1L) {
             "Expected one image input and one image output"
         }
@@ -149,17 +155,93 @@ class ColorizeEngine(profileDirectory: File) {
             }
         }
         val info = ModelInfo(channels, scale, width, height)
+        rememberMetadata(key, info)
+        return info
+    }
+
+    private fun rememberMetadata(key: ModelKey, info: ModelInfo) {
         metadata.keys.filter { it.path == key.path && it != key }.forEach { metadata.remove(it) }
         if (metadata.size >= 8) metadata.remove(metadata.keys.first())
         metadata[key] = info
-        return info
+    }
+
+    /** Validate the publisher's graph, including auxiliary inputs and unequal output channels. */
+    private fun inspectColor(session: OrtSession, type: String): ModelInfo {
+        val mainName = if (type == "manga_light") "L_bw" else "input"
+        val outputName = when (type) {
+            "manga_v2" -> "rgb"
+            "manga_light" -> "rgb_pred"
+            else -> "output"
+        }
+        val expectedInputs = if (type == "manga_light")
+            setOf("L_bw", "sam_level0", "sam_level1", "wd14_embedding") else setOf(mainName)
+        require(session.inputNames == expectedInputs && session.outputNames == setOf(outputName)) {
+            "$type requires inputs $expectedInputs and output $outputName"
+        }
+        fun tensor(name: String, output: Boolean = false): TensorInfo {
+            val nodes = if (output) session.outputInfo else session.inputInfo
+            val info = nodes[name]?.info as? TensorInfo
+                ?: throw IllegalArgumentException("$type $name must be a tensor")
+            require(info.type == OnnxJavaType.FLOAT) { "$type $name must be float32" }
+            return info
+        }
+        fun imageShape(info: TensorInfo, channels: Int, name: String): LongArray {
+            val shape = info.shape
+            require(shape.size == 4 && (shape[0] < 0 || shape[0] == 1L) &&
+                shape[1] == channels.toLong() && shape[2] != 0L && shape[3] != 0L) {
+                "$type $name must be float32 NCHW with $channels channels and batch 1"
+            }
+            require(shape[2] <= 2048 && shape[3] <= 2048) { "$type $name spatial dimensions are too large" }
+            return shape
+        }
+        val channels = when (type) { "manga_v2" -> 5; "manga_light" -> 1; else -> 3 }
+        val input = imageShape(tensor(mainName), channels, mainName)
+        val output = imageShape(tensor(outputName, true), if (type == "ddcolor") 2 else 3, outputName)
+        if (type == "anime_deoldify") {
+            val expected = longArrayOf(1, 3, 256, 256)
+            require(input.contentEquals(expected) && output.contentEquals(expected)) {
+                "anime_deoldify requires fixed float32 [1,3,256,256] RGB input and output"
+            }
+        } else if (type == "manga_v2") {
+            require((2..3).all { axis ->
+                (input[axis] < 0 || input[axis] == 512L) &&
+                    (output[axis] < 0 || (input[axis] == 512L && output[axis] == 512L))
+            }) {
+                "manga_v2 spatial axes must be dynamic or fixed at 512"
+            }
+        } else {
+            val side = if (type == "manga_light") 512L else
+                input[2].takeIf { it > 0 } ?: input[3].takeIf { it > 0 } ?: 256L
+            require((input[2] < 0 || input[2] == side) && (input[3] < 0 || input[3] == side) &&
+                (output[2] < 0 || output[2] == side) && (output[3] < 0 || output[3] == side)) {
+                "$type requires square input/output spatial dimensions"
+            }
+            if (type == "ddcolor") {
+                require(side % 32 == 0L && ((input[2] < 0 && input[3] < 0) ||
+                    (input[2] == side && input[3] == side))) {
+                    "ddcolor requires dynamic dimensions or a square side divisible by 32"
+                }
+            }
+            if (type == "manga_light") {
+                for ((name, size) in listOf("sam_level0" to 32L, "sam_level1" to 16L)) {
+                    val shape = imageShape(tensor(name), 256, name)
+                    require((shape[2] < 0 || shape[2] == size) && (shape[3] < 0 || shape[3] == size)) {
+                        "manga_light $name must support [1,256,$size,$size]"
+                    }
+                }
+                val embedding = tensor("wd14_embedding").shape
+                require(embedding.size == 2 && (embedding[0] < 0 || embedding[0] == 1L) &&
+                    embedding[1] == 1024L) { "manga_light wd14_embedding must support [1,1024]" }
+            }
+        }
+        return ModelInfo(channels, 1, input[3].coerceAtLeast(0).toInt(), input[2].coerceAtLeast(0).toInt())
     }
 
     fun colorize(input: Bitmap, modelPath: String, modelId: String, inputId: String,
                  type: String, backend: String, intensity: Float, strength: Float,
                  outputScale: Double): Output {
         require(backend == "auto" || backend == "cpu") { "Unsupported backend: $backend" }
-        require(type == "esrgan" || type == "deoldify") { "Unsupported type: $type" }
+        require(type in SUPPORTED_TYPES) { "Unsupported type: $type" }
         require(intensity.isFinite() && intensity in (if (type == "esrgan") 0.3f else 0f)..1.2f) {
             "Intensity is outside the supported range"
         }
@@ -174,17 +256,17 @@ class ColorizeEngine(profileDirectory: File) {
         val targetH = (input.height * scale).roundToInt()
         val nativePixels = input.width.toLong() * input.height * info.scale * info.scale
         val targetPixels = targetW.toLong() * targetH
-        val noInference = (type == "esrgan" && strength == 0f) || (type == "deoldify" && intensity == 0f)
+        val noInference = (type == "esrgan" && strength == 0f) || (type != "esrgan" && intensity == 0f)
         // Bound phase peaks, not the sum of buffers whose lifetimes do not overlap.
         val inputPixels = input.width.toLong() * input.height
-        val workingBytes = if (type == "deoldify") inputPixels * (if (noInference) 48 else 72)
+        val workingBytes = if (type != "esrgan") inputPixels * (if (noInference) 48 else 72)
             else inputPixels * 20 + targetPixels * 32 + (if (noInference) 0L else nativePixels * 44)
         require(workingBytes <= WORK_LIMIT) {
             "Requested output exceeds the 768 MiB Android AI working-image limit; use a smaller input/model scale"
         }
-        if ((type == "esrgan" && strength == 0f) || (type == "deoldify" && intensity == 0f)) {
+        if (noInference) {
             val bitmap = if (type == "esrgan") ImageUtils.renderSr(input, null, targetW, targetH, 0f)
-                else renderColor(input, null, 0f)
+                else renderColor(input, null, 0f, type == "deoldify")
             return Output(bitmap, "none", info.scale, false, null)
         }
         val cacheKey = CacheKey(key, inputId, backend)
@@ -212,6 +294,7 @@ class ColorizeEngine(profileDirectory: File) {
     private fun infer(input: Bitmap, key: ModelKey, info: ModelInfo, backend: String): Base {
         val cpu = models.getSession(key.path, key.identity, false)
         if (key.type == "deoldify") return Base(inferColor(input, cpu.ort), "cpu", null)
+        if (key.type in MODERN_COLOR_TYPES) return Base(inferModernColor(input, cpu.ort, key.type, info), "cpu", null)
         if (backend == "cpu") return Base(inferSr(input, cpu.ort, info, null), "cpu", null)
         try {
             val accelerated = models.getSession(key.path, key.identity, true)
@@ -251,11 +334,128 @@ class ColorizeEngine(profileDirectory: File) {
         m.keep(ab) // Unquantized signed chroma; render intensity never enters inference.
     }
 
-    private fun renderColor(input: Bitmap, chroma: Mat?, intensity: Float): Bitmap = Mats().use { m ->
+    /** New pipelines cache signed float Lab ab, never rendered RGB or intensity-dependent data. */
+    private fun inferModernColor(input: Bitmap, session: OrtSession, type: String, info: ModelInfo): Mat =
+        Mats().use { m ->
+            val bgr = m.own(ImageUtils.bitmapToBgrMat(input))
+            val prediction = m.own(when (type) {
+                "manga_v2" -> inferMangaV2(bgr, session, info)
+                "manga_light" -> inferMangaLight(bgr, session)
+                "ddcolor" -> inferDdcolor(bgr, session, info)
+                "anime_deoldify" -> inferAnimeDeoldify(bgr, session)
+                else -> throw IllegalArgumentException("Unsupported color pipeline: $type")
+            })
+            val ab = if (type == "ddcolor") prediction else {
+                Core.max(prediction, Scalar(0.0, 0.0, 0.0), prediction)
+                Core.min(prediction, Scalar(1.0, 1.0, 1.0), prediction)
+                val lab = m.create()
+                Imgproc.cvtColor(prediction, lab, Imgproc.COLOR_RGB2Lab)
+                val a = m.create(); val b = m.create()
+                Core.extractChannel(lab, a, 1); Core.extractChannel(lab, b, 2)
+                m.create().also { Core.merge(listOf(a, b), it) }
+            }
+            val full = m.create()
+            Imgproc.resize(ab, full, Size(input.width.toDouble(), input.height.toDouble()),
+                0.0, 0.0, Imgproc.INTER_LINEAR)
+            m.keep(full)
+        }
+
+    /** The converted Dakini graph embeds normalization and returns RGB in the 0..255 range. */
+    private fun inferAnimeDeoldify(bgr: Mat, session: OrtSession): Mat = Mats().use { m ->
+        val resized = m.create()
+        Imgproc.resize(bgr, resized, Size(256.0, 256.0), 0.0, 0.0, Imgproc.INTER_LINEAR)
+        val gray = m.create()
+        Imgproc.cvtColor(resized, gray, Imgproc.COLOR_BGR2GRAY)
+        val rgb = m.create()
+        Imgproc.cvtColor(gray, rgb, Imgproc.COLOR_GRAY2RGB)
+        rgb.convertTo(rgb, CvType.CV_32F)
+        val prediction = m.own(run(session, rgb, 3, 256, 256))
+        prediction.convertTo(prediction, CvType.CV_32F, 1.0 / 255.0)
+        m.keep(prediction)
+    }
+
+    private fun inferMangaV2(bgr: Mat, session: OrtSession, info: ModelInfo): Mat = Mats().use { m ->
+        val ratio = 512.0 / maxOf(bgr.cols(), bgr.rows())
+        val width = maxOf(32, (bgr.cols() * ratio).roundToInt())
+        val height = maxOf(32, (bgr.rows() * ratio).roundToInt())
+        val paddedW = if (info.inputWidth > 0) info.inputWidth else (width + 31) / 32 * 32
+        val paddedH = if (info.inputHeight > 0) info.inputHeight else (height + 31) / 32 * 32
+        val red = m.create()
+        Core.extractChannel(bgr, red, 2) // Publisher's ch0 is the original RGB first channel, not gray.
+        Imgproc.resize(red, red, Size(width.toDouble(), height.toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR)
+        val padded = m.create()
+        Core.copyMakeBorder(red, padded, 0, paddedH - height, 0, paddedW - width,
+            Core.BORDER_CONSTANT, Scalar(255.0))
+        padded.convertTo(padded, CvType.CV_32F, 1.0 / 255.0)
+        val plane = paddedW * paddedH
+        val values = FloatArray(5 * plane) // The four hint/mask planes intentionally remain zero.
+        val row = FloatArray(paddedW)
+        for (y in 0 until paddedH) {
+            padded.get(y, 0, row)
+            row.copyInto(values, y * paddedW)
+        }
+        OnnxTensor.createTensor(env, FloatBuffer.wrap(values),
+            longArrayOf(1, 5, paddedH.toLong(), paddedW.toLong())).use { tensor ->
+            session.run(mapOf("input" to tensor)).use { results ->
+                val rgb = m.own(decodeOutput(results, 3, paddedH, paddedW))
+                val crop = m.own(Mat(rgb, Rect(0, 0, width, height)))
+                m.keep(crop) // The ROI owns a reference to the backing storage after rgb is released.
+            }
+        }
+    }
+
+    /** Official generator-only automatic mode: no SAM features or WD14 semantic guidance. */
+    private fun inferMangaLight(bgr: Mat, session: OrtSession): Mat = Mats().use { m ->
+        val gray = m.create()
+        Imgproc.cvtColor(bgr, gray, Imgproc.COLOR_BGR2GRAY)
+        Imgproc.resize(gray, gray, Size(512.0, 512.0), 0.0, 0.0, Imgproc.INTER_AREA)
+        gray.convertTo(gray, CvType.CV_32F, 1.0 / 127.5, -1.0)
+        OnnxTensor.createTensor(env, ImageUtils.hwcToNchwFloatBuffer(gray), longArrayOf(1, 1, 512, 512)).use { image ->
+            OnnxTensor.createTensor(env, FloatBuffer.allocate(256 * 32 * 32), longArrayOf(1, 256, 32, 32)).use { sam0 ->
+                OnnxTensor.createTensor(env, FloatBuffer.allocate(256 * 16 * 16), longArrayOf(1, 256, 16, 16)).use { sam1 ->
+                    OnnxTensor.createTensor(env, FloatBuffer.allocate(1024), longArrayOf(1, 1024)).use { embedding ->
+                        session.run(mapOf("L_bw" to image, "sam_level0" to sam0,
+                            "sam_level1" to sam1, "wd14_embedding" to embedding)).use { results ->
+                            val rgb = m.own(decodeOutput(results, 3, 512, 512))
+                            rgb.convertTo(rgb, CvType.CV_32F, 0.5, 0.5)
+                            m.keep(rgb)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /** FaceFusion preprocessing: grayscale -> neutral float Lab -> RGB; output is raw signed ab. */
+    private fun inferDdcolor(bgr: Mat, session: OrtSession, info: ModelInfo): Mat = Mats().use { m ->
+        val grayRgb = m.create()
+        Imgproc.cvtColor(bgr, grayRgb, Imgproc.COLOR_BGR2GRAY)
+        Imgproc.cvtColor(grayRgb, grayRgb, Imgproc.COLOR_GRAY2RGB)
+        grayRgb.convertTo(grayRgb, CvType.CV_32F, 1.0 / 255.0)
+        val lab = m.create()
+        Imgproc.cvtColor(grayRgb, lab, Imgproc.COLOR_RGB2Lab)
+        val luminance = m.create()
+        Core.extractChannel(lab, luminance, 0)
+        val neutral = m.own(Mat.zeros(bgr.rows(), bgr.cols(), CvType.CV_32FC2))
+        Core.merge(listOf(luminance, neutral), lab)
+        Imgproc.cvtColor(lab, grayRgb, Imgproc.COLOR_Lab2RGB)
+        val side = if (info.inputWidth > 0) info.inputWidth else 256
+        Imgproc.resize(grayRgb, grayRgb, Size(side.toDouble(), side.toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR)
+        m.keep(m.own(run(session, grayRgb, 2, side, side)))
+    }
+
+    private fun renderColor(input: Bitmap, chroma: Mat?, intensity: Float, legacy: Boolean = true): Bitmap = Mats().use { m ->
         val bgr = m.own(ImageUtils.bitmapToBgrMat(input))
         val luminance = m.create()
-        Core.extractChannel(bgr, luminance, 0)
-        luminance.convertTo(luminance, CvType.CV_32F, 100.0 / 255.0)
+        if (legacy) {
+            Core.extractChannel(bgr, luminance, 0)
+            luminance.convertTo(luminance, CvType.CV_32F, 100.0 / 255.0)
+        } else {
+            val originalLab = m.create()
+            bgr.convertTo(originalLab, CvType.CV_32F, 1.0 / 255.0)
+            Imgproc.cvtColor(originalLab, originalLab, Imgproc.COLOR_BGR2Lab)
+            Core.extractChannel(originalLab, luminance, 0)
+        }
         val ab = if (chroma == null) m.own(Mat.zeros(input.height, input.width, CvType.CV_32FC2))
             else m.create().also { chroma.convertTo(it, CvType.CV_32F, intensity.toDouble()) }
         val lab = m.create()
@@ -367,22 +567,27 @@ class ColorizeEngine(profileDirectory: File) {
 
     private fun run(session: OrtSession, input: Mat, channels: Int, height: Int, width: Int): Mat {
         OnnxTensor.createTensor(env, ImageUtils.hwcToNchwFloatBuffer(input),
-            longArrayOf(1, channels.toLong(), input.rows().toLong(), input.cols().toLong())).use { tensor ->
+            longArrayOf(1, input.channels().toLong(), input.rows().toLong(), input.cols().toLong())).use { tensor ->
             session.run(mapOf(session.inputNames.first() to tensor)).use { results ->
-                val output = results[0] as? OnnxTensor ?: throw IllegalArgumentException("Expected tensor output")
-                require(output.info.shape.contentEquals(longArrayOf(1, channels.toLong(), height.toLong(), width.toLong()))) {
-                    "Unexpected model output dimensions"
-                }
-                val values = output.floatBuffer
-                for (i in 0 until values.remaining()) require(values.get(i).isFinite()) { "Model returned non-finite pixels" }
-                return ImageUtils.nchwToHwcMat(values, channels, height, width)
+                return decodeOutput(results, channels, height, width)
             }
         }
     }
 
+    private fun decodeOutput(results: OrtSession.Result, channels: Int, height: Int, width: Int): Mat {
+        val output = results[0] as? OnnxTensor ?: throw IllegalArgumentException("Expected tensor output")
+        require(output.info.type == OnnxJavaType.FLOAT &&
+            output.info.shape.contentEquals(longArrayOf(1, channels.toLong(), height.toLong(), width.toLong()))) {
+            "Unexpected model output: expected float32 [1,$channels,$height,$width], got ${output.info}"
+        }
+        val values = output.floatBuffer
+        for (i in 0 until values.remaining()) require(values.get(i).isFinite()) { "Model returned non-finite pixels" }
+        return ImageUtils.nchwToHwcMat(values, channels, height, width)
+    }
+
     private fun render(input: Bitmap, base: Base, info: ModelInfo, type: String, width: Int,
                        height: Int, intensity: Float, strength: Float): Bitmap {
-        if (type == "deoldify") return renderColor(input, base.pixels, intensity)
+        if (type != "esrgan") return renderColor(input, base.pixels, intensity, type == "deoldify")
         return Mats().use { m ->
             val enhanced = if (info.channels == 3 && intensity == 1f) base.pixels
                 else m.own(base.pixels.clone())
@@ -420,6 +625,8 @@ class ColorizeEngine(profileDirectory: File) {
     }
 
     companion object {
+        private val MODERN_COLOR_TYPES = setOf("manga_v2", "manga_light", "ddcolor", "anime_deoldify")
+        private val SUPPORTED_TYPES = MODERN_COLOR_TYPES + setOf("esrgan", "deoldify")
         private const val CACHE_LIMIT = 128L * 1024 * 1024
         private const val WORK_LIMIT = 768L * 1024 * 1024
     }

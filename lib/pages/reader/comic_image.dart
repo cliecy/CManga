@@ -66,7 +66,10 @@ class ComicImage extends StatefulWidget {
 
   final void Function(State<ComicImage> state)? onDispose;
 
-  static void clear() => _ComicImageState.clear();
+  static void clear() {
+    ReaderImageDetailsStore.instance.invalidate();
+    _ComicImageState.clear();
+  }
 
   @override
   State<ComicImage> createState() => _ComicImageState();

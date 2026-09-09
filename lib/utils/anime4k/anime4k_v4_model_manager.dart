@@ -20,6 +20,10 @@ class V4ModelDef {
   final int sizeHintMB;
   final String? bundledAssetPath;
   final List<String> defaultUrls;
+  final String? sha256Digest;
+  final String sourceUrl;
+  final String licenseNote;
+  final String protocolNote;
 
   const V4ModelDef({
     required this.id,
@@ -29,11 +33,15 @@ class V4ModelDef {
     required this.sizeHintMB,
     this.bundledAssetPath,
     required this.defaultUrls,
+    this.sha256Digest,
+    required this.sourceUrl,
+    required this.licenseNote,
+    required this.protocolNote,
   });
 }
 
-/// v4 超分模型管理器：管理 Anime4K v4 超分 ONNX 模型（默认官方 ACNet 2×，可选 Real-ESRGAN
-/// 4× / 通用 2×）的生命周期。支持多模型，所有对外方法按“当前选中模型”路由，调用方无需传 modelId。
+/// v4 super-resolution lifecycle: ACNet and independently installed Real-ESRGAN
+/// models. Captured definitions keep installs isolated from selection changes.
 ///
 /// 模型获取策略（三选一，优先级从高到低）：
 ///  1. 自选外部模型（用户从本地导入，最高优先，绝不被覆盖）；
@@ -42,7 +50,7 @@ class V4ModelDef {
 ///
 /// Model files are streamed and validated before replacement on either platform.
 class Anime4KV4ModelManager {
-  /// 模型注册表：4x 动画模型 + 2x 通用模型。新增权重只需在此追加一项。
+  /// Lightweight animation defaults and optional general-purpose RRDB models.
   static final List<V4ModelDef> models = [
     V4ModelDef(
       id: 'anime4k_acnet',
@@ -56,6 +64,11 @@ class Anime4KV4ModelManager {
         'https://ghproxy.net/https://github.com/Kiastr/Venera-SSR/releases/download/model/anime4k_acnet.onnx',
         'https://github.com/Kiastr/Venera-SSR/releases/download/model/anime4k_acnet.onnx',
       ],
+      sourceUrl: 'https://github.com/TianZerL/Anime4KCPP',
+      licenseNote:
+          'Official Anime4KCPP ACNet distribution; retain the upstream license and notices.',
+      protocolNote:
+          'esrgan: 1-channel luminance input/output, 2×; original chroma retained.',
     ),
     V4ModelDef(
       id: 'anime4k_x4',
@@ -68,29 +81,51 @@ class Anime4KV4ModelManager {
         'https://ghproxy.net/https://github.com/Kiastr/Venera-SSR/releases/download/model/realesr_animevideov3.onnx',
         'https://github.com/Kiastr/Venera-SSR/releases/download/model/realesr_animevideov3.onnx',
       ],
+      sourceUrl: 'https://github.com/xinntao/Real-ESRGAN',
+      licenseNote:
+          'Real-ESRGAN: BSD-3-Clause; existing third-party animevideov3 ONNX distribution.',
+      protocolNote:
+          'esrgan: RGB 0..1 → RGB 0..1, 4×; lightweight animation model.',
     ),
     V4ModelDef(
-      id: 'general_x2',
-      fileName: 'realesr_general_x2c.onnx',
-      displayName: '通用 2× (Real-ESRGAN)',
+      id: 'realesrgan_x2plus',
+      fileName: 'realesrgan_x2plus.onnx',
+      displayName: 'RealESRGAN-x2plus (~67 MB, slower, general-purpose)',
       scale: 2,
-      sizeHintMB: 8,
-      bundledAssetPath: null, // 运行时下载
+      sizeHintMB: 67,
       defaultUrls: [
-        'https://ghproxy.net/https://github.com/Kiastr/Venera-SSR/releases/download/model/realesr_general_x2c.onnx',
-        'https://github.com/Kiastr/Venera-SSR/releases/download/model/realesr_general_x2c.onnx',
+        'https://huggingface.co/SceneWorks/real-esrgan-onnx/resolve/09f741bac80a246b407da3ee902bf5f3291b602f/real_esrgan_x2.onnx',
       ],
+      sha256Digest:
+          '7115ba92e8a1bfa63d68558ef006ef3d91273a068d321b1439f8bb1c9179002c',
+      sourceUrl: 'https://huggingface.co/SceneWorks/real-esrgan-onnx',
+      licenseNote:
+          'BSD-3-Clause. Weights: Xintao Wang / Real-ESRGAN; ONNX export: SceneWorks. Preserve copyright, license and disclaimer. Not manga-specialized; GAN may redraw details.',
+      protocolNote:
+          'esrgan: float32 [1,3,H,W] RGB 0..1 → [1,3,2H,2W]; even input tiles, original output cropped to 2×. 67,073,434 bytes; 23-block RRDB, slower than ACNet.',
+    ),
+    V4ModelDef(
+      id: 'realesrgan_x4plus',
+      fileName: 'realesrgan_x4plus.onnx',
+      displayName: 'RealESRGAN-x4plus (~67 MB, slower, general-purpose)',
+      scale: 4,
+      sizeHintMB: 67,
+      defaultUrls: [
+        'https://huggingface.co/SceneWorks/real-esrgan-onnx/resolve/09f741bac80a246b407da3ee902bf5f3291b602f/real_esrgan_x4.onnx',
+      ],
+      sha256Digest:
+          '5c586662929cbc686c1a5c38d9c060dbdb4ea5863a1f7672b8c0761e6b89c033',
+      sourceUrl: 'https://huggingface.co/SceneWorks/real-esrgan-onnx',
+      licenseNote:
+          'BSD-3-Clause. Weights: Xintao Wang / Real-ESRGAN; ONNX export: SceneWorks. Preserve copyright, license and disclaimer. Not manga-specialized; GAN may redraw details.',
+      protocolNote:
+          'esrgan: float32 [1,3,H,W] RGB 0..1 → [1,3,4H,4W]. 67,051,616 bytes; 23-block RRDB, slower with higher memory use. Not x4plus-anime-6B.',
     ),
   ];
 
   static const String _selectedModelKey = 'anime4kV4_selected_model';
   static String _selectedModelId = 'anime4k_acnet';
-
-  static List<String> _modelUrls = [];
-  static bool _urlsLoaded = false;
-
-  static bool _customModelActive = false;
-  static String? _customModelName;
+  static bool legacySelectionMigrated = false;
 
   static bool _isDownloading = false;
   static double _downloadProgress = 0.0;
@@ -110,8 +145,17 @@ class Anime4KV4ModelManager {
 
   static bool isValidModelId(String id) => models.any((m) => m.id == id);
 
-  /// 切换当前选中模型并持久化；重置内存态（含下载/自选状态），下次读取从 prefs 重载。
+  /// Retired preset had no working release. Never reuse its file or custom
+  /// record as x2plus; those files remain untouched for explicit local import.
+  static String migrateModelId(String id) {
+    if (id != 'general_x2') return id;
+    legacySelectionMigrated = true;
+    return 'realesrgan_x2plus';
+  }
+
+  /// Persist the selected preset; installations and custom records stay isolated.
   static Future<void> setSelectedModelId(String id) async {
+    id = migrateModelId(id);
     if (!isValidModelId(id)) return;
     _selectedModelId = id;
     _resetMemState();
@@ -120,69 +164,58 @@ class Anime4KV4ModelManager {
   }
 
   static void _resetMemState() {
-    _urlsLoaded = false;
-    _customModelActive = false;
-    _customModelName = null;
+    // All model-scoped preferences are read by definition, not a global cache.
     if (!_isDownloading) {
       _downloadProgress = 0.0;
       _currentStatus = null;
     }
   }
 
-  /// 获取当前生效的镜像 URL 列表（懒加载 + 持久化）
-  static Future<List<String>> getModelUrls() async {
-    final def = selectedDef;
-    final key = 'anime4kV4_urls_${def.id}';
-    if (!_urlsLoaded) {
-      final prefs = await SharedPreferences.getInstance();
-      final saved = prefs.getStringList(key);
-      _modelUrls = (saved != null && saved.isNotEmpty)
-          ? List.from(saved)
-          : List.from(def.defaultUrls);
-      _urlsLoaded = true;
-    }
-    return List.from(_modelUrls);
+  /// Read mirror preferences for the captured model, including an empty list.
+  static Future<List<String>> getModelUrls({V4ModelDef? model}) async {
+    final def = model ?? selectedDef;
+    final prefs = await SharedPreferences.getInstance();
+    return List.from(
+      prefs.getStringList('anime4kV4_urls_${def.id}') ?? def.defaultUrls,
+    );
   }
 
   static Future<void> addModelUrl(String url) async {
-    await getModelUrls();
+    final def = selectedDef;
+    final urls = await getModelUrls(model: def);
     final trimmed = url.trim();
-    if (trimmed.isEmpty || _modelUrls.contains(trimmed)) return;
-    _modelUrls.add(trimmed);
+    if (trimmed.isEmpty || urls.contains(trimmed)) return;
+    urls.add(trimmed);
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList('anime4kV4_urls_${selectedDef.id}', _modelUrls);
+    await prefs.setStringList('anime4kV4_urls_${def.id}', urls);
   }
 
   static Future<void> removeModelUrlAt(int index) async {
-    await getModelUrls();
-    if (index < 0 || index >= _modelUrls.length) return;
-    _modelUrls.removeAt(index);
+    final def = selectedDef;
+    final urls = await getModelUrls(model: def);
+    if (index < 0 || index >= urls.length) return;
+    urls.removeAt(index);
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList('anime4kV4_urls_${selectedDef.id}', _modelUrls);
+    await prefs.setStringList('anime4kV4_urls_${def.id}', urls);
   }
 
   static Future<void> resetModelUrls() async {
     final def = selectedDef;
-    _modelUrls = List.from(def.defaultUrls);
-    _urlsLoaded = true;
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList('anime4kV4_urls_${def.id}', _modelUrls);
+    await prefs.remove('anime4kV4_urls_${def.id}');
   }
 
-  static Future<bool> isCustomModelActive() async {
-    if (_customModelActive) return true;
-    final def = selectedDef;
+  static Future<bool> isCustomModelActive({V4ModelDef? model}) async {
+    final def = model ?? selectedDef;
     final prefs = await SharedPreferences.getInstance();
-    _customModelActive = prefs.getBool('anime4kV4_custom_${def.id}') ?? false;
-    return _customModelActive;
+    return (prefs.getBool('anime4kV4_custom_${def.id}') ?? false) &&
+        await ensureModelAvailable(model: def) != null;
   }
 
   static Future<String?> getCustomModelName() async {
-    if (_customModelName != null) return _customModelName;
     final def = selectedDef;
     final prefs = await SharedPreferences.getInstance();
-    _customModelName = prefs.getString('anime4kV4_custom_name_${def.id}');
-    return _customModelName;
+    return prefs.getString('anime4kV4_custom_name_${def.id}');
   }
 
   /// 回退到内置（下载）模型：删除被覆盖的模型调用位置文件，若存在此前备份则还原。
@@ -202,8 +235,6 @@ class Anime4KV4ModelManager {
       final target = File(targetPath);
       if (await target.exists()) await target.delete();
     }
-    _customModelActive = false;
-    _customModelName = null;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('anime4kV4_custom_${def.id}', false);
     await prefs.remove('anime4kV4_custom_name_${def.id}');
@@ -212,13 +243,14 @@ class Anime4KV4ModelManager {
   }
 
   /// 标记“模型调用位置的文件”为自选外部模型（写 prefs + 刷新缓存路径）。
-  static Future<void> markCustomModelActive(String displayName) async {
-    final def = selectedDef;
+  static Future<void> markCustomModelActive(
+    String displayName, {
+    V4ModelDef? model,
+  }) async {
+    final def = model ?? selectedDef;
     final dir = await getApplicationSupportDirectory();
     final targetPath = path.join(dir.path, def.fileName);
     await ImageAiService.instance.getModelInfo(targetPath, 'esrgan');
-    _customModelActive = true;
-    _customModelName = displayName;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('anime4kV4_custom_${def.id}', true);
     await prefs.setString('anime4kV4_custom_name_${def.id}', displayName);
@@ -230,7 +262,7 @@ class Anime4KV4ModelManager {
     try {
       final def = selectedDef;
       // 用户自选外部模型时不覆盖
-      if (await isCustomModelActive()) return;
+      if (await isCustomModelActive(model: def)) return;
 
       final prefs = await SharedPreferences.getInstance();
       final installedKey = 'anime4kV4_bundled_${def.id}';
@@ -297,9 +329,10 @@ class Anime4KV4ModelManager {
   }
 
   /// 获取模型文件路径（即模型调用位置）。不自动下载；文件不存在或无效则返回 null。
-  static Future<String?> ensureModelAvailable() async {
+  static Future<String?> ensureModelAvailable({V4ModelDef? model}) async {
+    final def = model ?? selectedDef;
     final dir = await getApplicationSupportDirectory();
-    final target = File(path.join(dir.path, selectedDef.fileName));
+    final target = File(path.join(dir.path, def.fileName));
     return await target.exists() && await target.length() > 0
         ? target.path
         : null;
@@ -351,7 +384,7 @@ class Anime4KV4ModelManager {
       }
 
       Exception? lastError;
-      final urls = await getModelUrls();
+      final urls = await getModelUrls(model: def);
       for (int i = 0; i < urls.length; i++) {
         final url = urls[i];
         reportStatus('Trying mirror ${i + 1}/${urls.length}...');
@@ -362,13 +395,22 @@ class Anime4KV4ModelManager {
           });
           final downloaded = await File(tempPath).length();
           if (downloaded > 0) {
+            if (def.sha256Digest != null) {
+              reportStatus('Verifying SHA-256...');
+              final digest = await ImageAiService.instance.modelIdentity(
+                tempFile.path,
+              );
+              if (digest != def.sha256Digest) {
+                throw StateError('Model SHA-256 mismatch');
+              }
+            }
             await ImageAiService.instance.installStagedModel(
               tempPath,
               targetPath,
               'esrgan',
             );
-            _customModelActive = false;
-            _customModelName = null;
+            final oldBackup = File('$targetPath.bak');
+            if (await oldBackup.exists()) await oldBackup.delete();
             final prefs = await SharedPreferences.getInstance();
             await prefs.setBool('anime4kV4_custom_${def.id}', false);
             await prefs.remove('anime4kV4_custom_name_${def.id}');
@@ -466,10 +508,10 @@ class Anime4KV4ModelManager {
     if (await bakFile.exists()) {
       await bakFile.delete();
     }
-    _customModelActive = false;
-    _customModelName = null;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('anime4kV4_custom_${def.id}', false);
     await prefs.remove('anime4kV4_custom_name_${def.id}');
+    // An explicit deletion must also suppress first-use bundle extraction.
+    await prefs.setBool('anime4kV4_bundled_${def.id}', true);
   }
 }

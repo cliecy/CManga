@@ -27,7 +27,8 @@ class Anime4KService {
   /// 缓存目录路径
   String? _cacheDir;
 
-  final _inFlight = <String, Future<Uint8List?>>{};
+  final _inFlight =
+      <String, Future<({Uint8List? bytes, ImageAiStatus status})?>>{};
   int _queuedBytes = 0;
   int _generation = 0;
 
@@ -125,6 +126,7 @@ class Anime4KService {
     double pushStrength = 0.31,
     double pushGradStrength = 1.0,
     double strength = 1.0,
+    void Function(ImageAiStatus)? onStatus,
   }) async {
     if (!scaleFactor.isFinite ||
         scaleFactor < 1 ||
@@ -141,6 +143,7 @@ class Anime4KService {
       ImageAiService.instance.reportError(
         'Invalid v1 scale or enhancement strength',
       );
+      onStatus?.call(ImageAiService.instance.status.value);
       return null;
     }
     final inputId = sha256.convert(imageBytes).toString();
@@ -148,85 +151,96 @@ class Anime4KService {
         'v1-base-v3:$inputId:$scaleFactor:$pushStrength:$pushGradStrength';
     final fullKey = 'v1-render-v3:$baseKey:$strength';
     final existing = _inFlight[fullKey];
-    if (existing != null) return existing;
+    if (existing != null) {
+      final result = (await existing)!;
+      onStatus?.call(result.status);
+      return result.bytes;
+    }
     if (_taskQueue.length >= 16 ||
         _queuedBytes + imageBytes.length > 128 * 1024 * 1024) {
       ImageAiService.instance.reportError(
         'Super-resolution queue is full; reload this page',
       );
+      onStatus?.call(ImageAiService.instance.status.value);
       return null;
     }
     _queuedBytes += imageBytes.length;
     final generation = _generation;
-    final future = _enqueueTask<Uint8List>(() async {
-      try {
-        if (_cacheDir == null) await init();
-        final cached = await _getFromCache(fullKey);
-        if (cached != null) {
+    final future = _enqueueTask<({Uint8List? bytes, ImageAiStatus status})>(
+      () async {
+        try {
+          if (_cacheDir == null) await init();
+          final cached = await _getFromCache(fullKey);
+          if (cached != null) {
+            const resultStatus = ImageAiStatus(
+              message: 'v1 rendered image cache (CPU)',
+              backend: 'cpu',
+              cacheHit: true,
+            );
+            ImageAiService.instance.status.value = resultStatus;
+            return (bytes: cached, status: resultStatus);
+          }
           ImageAiService.instance.status.value = const ImageAiStatus(
-            message: 'v1 rendered image cache (CPU)',
+            message: 'v1 super-resolution processing (CPU)',
             backend: 'cpu',
-            cacheHit: true,
+            isProcessing: true,
           );
-          return cached;
-        }
-        ImageAiService.instance.status.value = const ImageAiStatus(
-          message: 'v1 super-resolution processing (CPU)',
-          backend: 'cpu',
-          isProcessing: true,
-        );
-        Uint8List? enhanced;
-        var baseCacheHit = false;
-        if (strength > 0) {
-          enhanced = await _getFromCache(baseKey);
-          baseCacheHit = enhanced != null;
-          enhanced ??= await Anime4KUpscaler.processInIsolate(
-            Anime4KParams(
+          Uint8List? enhanced;
+          var baseCacheHit = false;
+          if (strength > 0) {
+            enhanced = await _getFromCache(baseKey);
+            baseCacheHit = enhanced != null;
+            enhanced ??= await Anime4KUpscaler.processInIsolate(
+              Anime4KParams(
+                imageBytes: imageBytes,
+                pushStrength: pushStrength,
+                pushGradStrength: pushGradStrength,
+                scaleFactor: scaleFactor,
+              ),
+            );
+            if (enhanced == null) {
+              throw StateError('v1 could not decode or enhance this image');
+            }
+            if (!baseCacheHit && generation == _generation) {
+              await _saveToCache(baseKey, enhanced);
+            }
+          }
+          final result = await Anime4KUpscaler.renderInIsolate(
+            Anime4KRenderParams(
               imageBytes: imageBytes,
-              pushStrength: pushStrength,
-              pushGradStrength: pushGradStrength,
+              enhancedBytes: enhanced,
               scaleFactor: scaleFactor,
+              strength: strength,
             ),
           );
-          if (enhanced == null) {
-            throw StateError('v1 could not decode or enhance this image');
-          }
-          if (!baseCacheHit && generation == _generation) {
-            await _saveToCache(baseKey, enhanced);
-          }
+          if (generation == _generation) await _saveToCache(fullKey, result);
+          final resultStatus = ImageAiStatus(
+            message: strength == 0
+                ? 'Base image resized; v1 enhancement skipped'
+                : baseCacheHit
+                ? 'v1 enhancement cache; strength rendered (CPU)'
+                : 'v1 super-resolution complete (CPU)',
+            backend: 'cpu',
+            cacheHit: baseCacheHit,
+          );
+          ImageAiService.instance.status.value = resultStatus;
+          return (bytes: result, status: resultStatus);
+        } catch (error) {
+          ImageAiService.instance.reportError(
+            error,
+            operation: 'v1 super-resolution failed',
+          );
+          return (bytes: null, status: ImageAiService.instance.status.value);
+        } finally {
+          _queuedBytes -= imageBytes.length;
         }
-        final result = await Anime4KUpscaler.renderInIsolate(
-          Anime4KRenderParams(
-            imageBytes: imageBytes,
-            enhancedBytes: enhanced,
-            scaleFactor: scaleFactor,
-            strength: strength,
-          ),
-        );
-        if (generation == _generation) await _saveToCache(fullKey, result);
-        ImageAiService.instance.status.value = ImageAiStatus(
-          message: strength == 0
-              ? 'Base image resized; v1 enhancement skipped'
-              : baseCacheHit
-              ? 'v1 enhancement cache; strength rendered (CPU)'
-              : 'v1 super-resolution complete (CPU)',
-          backend: 'cpu',
-          cacheHit: baseCacheHit,
-        );
-        return result;
-      } catch (error) {
-        ImageAiService.instance.reportError(
-          error,
-          operation: 'v1 super-resolution failed',
-        );
-        return null;
-      } finally {
-        _queuedBytes -= imageBytes.length;
-      }
-    });
+      },
+    );
     _inFlight[fullKey] = future;
     try {
-      return await future;
+      final result = (await future)!;
+      onStatus?.call(result.status);
+      return result.bytes;
     } finally {
       _inFlight.remove(fullKey);
     }

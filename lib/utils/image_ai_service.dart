@@ -170,9 +170,17 @@ class ImageAiService {
           {'modelPath': modelPath, 'type': type},
         );
         if (result == null ||
-            (result['channels'] != 1 && result['channels'] != 3) ||
+            (type == 'esrgan'
+                ? result['channels'] != 1 && result['channels'] != 3
+                : result['channels'] !=
+                      (type == 'manga_v2'
+                          ? 5
+                          : type == 'manga_light'
+                          ? 1
+                          : 3)) ||
             result['scale'] is! int ||
             (result['scale'] as int) < 1 ||
+            (type != 'esrgan' && result['scale'] != 1) ||
             result['inputWidth'] is! int ||
             result['inputHeight'] is! int) {
           throw StateError('Native AI returned invalid model metadata');
@@ -232,7 +240,10 @@ class ImageAiService {
     }
   }
 
-  Future<Map<String, dynamic>> process(Map<String, dynamic> arguments) async {
+  Future<Map<String, dynamic>> process(
+    Map<String, dynamic> arguments, {
+    void Function(ImageAiStatus)? onStatus,
+  }) async {
     var operation = 'AI processing failed';
     try {
       final type = arguments['type'] as String;
@@ -277,7 +288,11 @@ class ImageAiService {
       final generation = _generation;
       final requestKey = '$generation:$key';
       final active = _inFlight[requestKey];
-      if (active != null) return await active;
+      if (active != null) {
+        final result = await active;
+        onStatus?.call(_resultStatus(result, operation));
+        return result;
+      }
       final future = _serial(() async {
         final stat = await File(modelPath).stat();
         final signature =
@@ -300,8 +315,9 @@ class ImageAiService {
               ...metadata,
               'imageBytes': await image.readAsBytes(),
               'cacheHit': true,
+              'renderedCacheHit': true,
             };
-            _reportResult(result, operation, rendered: true);
+            status.value = _resultStatus(result, operation);
             return result;
           } on FileSystemException {
             // Eviction or interrupted cache writes do not prevent inference.
@@ -340,32 +356,31 @@ class ImageAiService {
             // A full/unwritable temporary disk must not discard a real result.
           }
         }
-        _reportResult(result, operation);
+        status.value = _resultStatus(result, operation);
         return result;
       }, bytes: bytes.length);
       _inFlight[requestKey] = future;
       try {
-        return await future;
+        final result = await future;
+        onStatus?.call(_resultStatus(result, operation));
+        return result;
       } finally {
         _inFlight.remove(requestKey);
       }
     } catch (error) {
       reportError(error, operation: operation);
+      onStatus?.call(status.value);
       rethrow;
     }
   }
 
-  void _reportResult(
-    Map<String, dynamic> result,
-    String operation, {
-    bool rendered = false,
-  }) {
+  ImageAiStatus _resultStatus(Map<String, dynamic> result, String operation) {
     final backend = result['backend'] as String;
     final hit = result['cacheHit'] == true;
     final fallback = result['fallbackReason'] as String?;
-    status.value = ImageAiStatus(
+    return ImageAiStatus(
       message:
-          '$operation: ${rendered
+          '$operation: ${result['renderedCacheHit'] == true
               ? 'Rendered image cache'
               : hit
               ? 'Inference cache; rendered'

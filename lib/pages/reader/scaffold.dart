@@ -313,11 +313,16 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
       String title = context.reader.history!.title;
       String subTitle = context.reader.history!.subtitle;
       int maxPage = context.reader.images!.length;
-      int? page = await selectImage();
-      if (page == null) return;
-      page += 1;
-      String sourceKey = context.reader.type.sourceKey;
-      String imageKey = context.reader.images![page - 1];
+      var selectedImage = await selectImage();
+      if (!mounted ||
+          selectedImage == null ||
+          context.reader.chapter != ep ||
+          context.reader.eid != eid) {
+        return;
+      }
+      int page = selectedImage.page;
+      String sourceKey = selectedImage.sourceKey!;
+      String imageKey = selectedImage.imageKey;
       List<String> tags = context.reader.widget.tags;
       String author = context.reader.widget.author;
 
@@ -328,7 +333,7 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
           "E${context.reader.chapter}";
       var translatedTags = tags.map((e) => e.translateTagsToCN).toList();
 
-      if (isLiked()) {
+      if (ImageFavoriteManager().has(id, sourceKey, eid, page, ep)) {
         if (page == firstPage) {
           showToast(
             message: "The cover cannot be uncollected here".tl,
@@ -429,7 +434,9 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
       update();
     } catch (e, stackTrace) {
       Log.error("Image Favorite", e, stackTrace);
-      showToast(message: e.toString(), context: context, seconds: 1);
+      if (mounted) {
+        showToast(message: e.toString(), context: context, seconds: 1);
+      }
     }
   }
 
@@ -522,6 +529,13 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
           ),
         ),
       Tooltip(
+        message: "Image Information".tl,
+        child: IconButton(
+          icon: const Icon(Icons.info_outline),
+          onPressed: openImageDetails,
+        ),
+      ),
+      Tooltip(
         message: "Save Image".tl,
         child: IconButton(
           icon: const Icon(Icons.download),
@@ -568,6 +582,13 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
           ),
           LayoutBuilder(
             builder: (context, constrains) {
+              if (constrains.maxWidth <
+                  buttons.length * kMinInteractiveDimension) {
+                return SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(children: buttons),
+                );
+              }
               final small = (constrains.maxWidth - buttons.length * 50) < 120;
               return Row(
                 children: [
@@ -705,29 +726,66 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
   }
 
   void saveCurrentImage() async {
-    var result = await selectImageToData();
-    if (result == null) {
-      return;
+    if (!mounted) return;
+    final name = context.reader.widget.name;
+    final chapter = context.reader.chapter;
+    try {
+      var result = await selectImageToData();
+      if (!mounted || result == null) {
+        return;
+      }
+      var (imageIndex, data) = result;
+      var fileType = detectFileType(data);
+      // Snapshot the chapter before selection/processing can yield.
+      var filename = "${name}_EP${chapter}_P${imageIndex + 1}${fileType.ext}";
+      await saveFile(data: data, filename: filename);
+    } catch (e, stackTrace) {
+      Log.error("Save Image", e, stackTrace);
+      if (mounted) context.showMessage(message: e.toString());
     }
-    var (imageIndex, data) = result;
-    var fileType = detectFileType(data);
-    // Save file name: ComicName_EP{chapter}_P{page}.{ext} to avoid conflict.
-    // The chapter index of different group is continuous, so we use chapter number is enough.
-    var filename =
-        "${context.reader.widget.name}_EP${context.reader.chapter}_P${imageIndex + 1}${fileType.ext}";
-    saveFile(data: data, filename: filename);
   }
 
   void share() async {
-    var result = await selectImageToData();
-    if (result == null) {
-      return;
+    if (!mounted) return;
+    final name = context.reader.widget.name;
+    final chapter = context.reader.chapter;
+    try {
+      var result = await selectImageToData();
+      if (!mounted || result == null) {
+        return;
+      }
+      var (imageIndex, data) = result;
+      var fileType = detectFileType(data);
+      var filename = "${name}_EP${chapter}_P${imageIndex + 1}${fileType.ext}";
+      await Share.shareFile(
+        data: data,
+        filename: filename,
+        mime: fileType.mime,
+      );
+    } catch (e, stackTrace) {
+      Log.error("Share Image", e, stackTrace);
+      if (mounted) context.showMessage(message: e.toString());
     }
-    var (imageIndex, data) = result;
-    var fileType = detectFileType(data);
-    var filename =
-        "${context.reader.widget.name}_EP${context.reader.chapter}_P${imageIndex + 1}${fileType.ext}";
-    Share.shareFile(data: data, filename: filename, mime: fileType.mime);
+  }
+
+  void openImageDetails() {
+    if (!mounted) return;
+    final reader = context.reader;
+    final controller = reader._imageViewController;
+    final range = reader.isLoading
+        ? null
+        : controller is _GalleryModeState
+        ? controller.getCurrentPageImageRange()
+        : (reader.page - 1, reader.page);
+    showSideBar(
+      context,
+      _ReaderImageDetailsView(
+        reader,
+        currentStart: range?.$1 ?? -1,
+        currentEnd: range?.$2 ?? -1,
+      ),
+      width: 480,
+    );
   }
 
   void openSetting() {
@@ -884,10 +942,15 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
   /// If there are multiple images on screen,
   /// show an overlay to let the user select an image.
   ///
-  /// The return value is the index of the selected image.
-  Future<int?> selectImage() async {
+  /// The provider captures the selected image and its actual page number.
+  Future<ReaderImageProvider?> selectImage() async {
+    if (!mounted) return null;
     var reader = context.reader;
-    var imageViewController = context.reader._imageViewController;
+    var imageViewController = reader._imageViewController;
+    final images = reader.images;
+    final chapter = reader.chapter;
+    final eid = reader.eid;
+    if (images == null || images.isEmpty || reader.isLoading) return null;
 
     bool needsSelection = false;
     int? singleImageIndex;
@@ -910,37 +973,34 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
     }
 
     if (!needsSelection && singleImageIndex != null) {
-      return singleImageIndex;
+      if (singleImageIndex < 0 || singleImageIndex >= images.length) {
+        return null;
+      }
+      return _createImageProvider(singleImageIndex + 1, context);
     } else {
       var location = await _showSelectImageOverlay();
-      if (location == null) {
+      if (!mounted ||
+          location == null ||
+          !reader.mounted ||
+          reader.chapter != chapter ||
+          reader.eid != eid ||
+          !identical(reader.images, images) ||
+          !identical(reader._imageViewController, imageViewController)) {
         return null;
       }
-      var imageKey = imageViewController!.getImageKeyByOffset(location);
-      if (imageKey == null) {
-        return null;
-      }
-      return reader.images!.indexOf(imageKey);
+      return imageViewController?.getImageProviderByOffset(location);
     }
   }
 
   /// Same as [selectImage], but return the image data with its index.
   /// Returns (imageIndex, imageData) or null if cancelled.
   Future<(int, Uint8List)?> selectImageToData() async {
-    var i = await selectImage();
-    if (i == null) {
+    var provider = await selectImage();
+    if (!mounted || provider == null) {
       return null;
     }
-    var imageKey = context.reader.images![i];
-    Uint8List data;
-    if (imageKey.startsWith("file://")) {
-      data = await File(imageKey.substring(7)).readAsBytes();
-    } else {
-      data = await (await CacheManager().findCache(
-        "$imageKey@${context.reader.type.sourceKey}@${context.reader.cid}@${context.reader.eid}",
-      ))!.readAsBytes();
-    }
-    return (i, data);
+    final data = await provider.exportImage();
+    return (provider.page - 1, data);
   }
 
   Future<Offset?> _showSelectImageOverlay() {

@@ -115,7 +115,7 @@ class ColorizePlugin private constructor(context: Context, private val channel: 
         getEngine()
         val backends = mutableListOf("cpu")
         if (OrtEnvironment.getAvailableProviders().any { it.name == "NNAPI" }) backends.add("nnapi")
-        mapOf("supported" to true, "types" to listOf("esrgan", "deoldify"),
+        mapOf("supported" to true, "types" to listOf("esrgan", "deoldify", "manga_v2", "manga_light", "ddcolor", "anime_deoldify"),
             "backends" to backends, "reason" to null)
     } catch (e: Throwable) {
         mapOf("supported" to false, "types" to emptyList<String>(), "backends" to emptyList<String>(),

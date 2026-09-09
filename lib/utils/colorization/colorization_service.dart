@@ -29,12 +29,15 @@ class ColorizationService {
     _modelInfo = null;
     try {
       if (!await _ai.init()) return false;
-      final modelPath = await ColorizationModelManager.ensureModelAvailable();
+      final model = await ColorizationModelManager.getSelectedDefinition();
+      final modelPath = await ColorizationModelManager.ensureModelAvailable(
+        model: model,
+      );
       if (modelPath == null) {
         _ai.reportError('Colorization model is not installed');
         return false;
       }
-      final info = await _ai.getModelInfo(modelPath, 'deoldify');
+      final info = await _ai.getModelInfo(modelPath, model.type);
       _modelPath = modelPath;
       _modelInfo = info;
       return true;
@@ -55,31 +58,48 @@ class ColorizationService {
     required String cacheKey,
     double intensity = 1.0,
     String backend = 'auto',
+    void Function(ImageAiStatus)? onStatus,
   }) async {
+    var reportedFailure = false;
     try {
-      if (!await _ai.init()) return null;
-      final modelPath = await ColorizationModelManager.ensureModelAvailable();
+      if (!await _ai.init()) {
+        throw UnsupportedError(
+          _ai.capabilities['reason']?.toString() ?? 'AI backend unavailable',
+        );
+      }
+      final model = await ColorizationModelManager.getSelectedDefinition();
+      final modelPath = await ColorizationModelManager.ensureModelAvailable(
+        model: model,
+      );
       if (modelPath == null) {
         throw StateError('Colorization model is not installed');
       }
-      final info = await _ai.getModelInfo(modelPath, 'deoldify');
+      final info = await _ai.getModelInfo(modelPath, model.type);
       _modelPath = modelPath;
       _modelInfo = info;
-      final result = await _ai.process({
-        'imageBytes': imageBytes,
-        'modelPath': modelPath,
-        'type': 'deoldify',
-        'backend': backend,
-        'intensity': intensity,
-        'strength': 1.0,
-        'outputScale': 0.0,
-      });
+      final result = await _ai.process(
+        {
+          'imageBytes': imageBytes,
+          'modelPath': modelPath,
+          'type': model.type,
+          'backend': backend,
+          'intensity': intensity,
+          'strength': 1.0,
+          'outputScale': 0.0,
+        },
+        onStatus: (value) {
+          reportedFailure = value.isError;
+          onStatus?.call(value);
+        },
+      );
       return result['imageBytes'] as Uint8List;
     } catch (error) {
+      if (reportedFailure) return null;
       _ai.reportError(
         error,
         operation: 'Colorization failed; page not colorized',
       );
+      onStatus?.call(_ai.status.value);
       return null;
     }
   }
@@ -102,6 +122,19 @@ class ColorizationService {
     }
   }
 
-  Future<void> clearCache() => _ai.clearRenderedCache('deoldify');
-  Future<int> getCacheSize() => _ai.cacheSize('deoldify');
+  Future<void> clearCache() async {
+    for (final type
+        in ColorizationModelManager.modelVariants.map((m) => m.type).toSet()) {
+      await _ai.clearRenderedCache(type);
+    }
+  }
+
+  Future<int> getCacheSize() async {
+    var total = 0;
+    for (final type
+        in ColorizationModelManager.modelVariants.map((m) => m.type).toSet()) {
+      total += await _ai.cacheSize(type);
+    }
+    return total;
+  }
 }

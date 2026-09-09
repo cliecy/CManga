@@ -11,6 +11,7 @@ import 'package:venera/utils/io.dart';
 import '../history.dart';
 import 'base_image_provider.dart';
 import 'image_favorites_provider.dart' as image_provider;
+import 'reader_image.dart';
 
 class ImageFavoritesProvider
     extends BaseImageProvider<image_provider.ImageFavoritesProvider> {
@@ -32,16 +33,49 @@ class ImageFavoritesProvider
     StreamController<ImageChunkEvent>? chunkEvents,
     void Function()? checkStop,
   ) async {
+    final source = await _loadSource(chunkEvents, checkStop);
+    final events = chunkEvents ?? StreamController<ImageChunkEvent>.broadcast();
+    try {
+      return await ReaderImageProvider(
+        source.imageKey,
+        sourceKey,
+        cid,
+        eid,
+        page,
+      ).load(events, checkStop ?? () {}, sourceBytes: source.bytes);
+    } finally {
+      if (chunkEvents == null) await events.close();
+    }
+  }
+
+  Future<Uint8List> exportImage() async {
+    final source = await _loadSource(null, null);
+    return ReaderImageProvider(
+      source.imageKey,
+      sourceKey,
+      cid,
+      eid,
+      page,
+    ).exportImage(sourceBytes: source.bytes);
+  }
+
+  Future<({String imageKey, Uint8List bytes})> _loadSource(
+    StreamController<ImageChunkEvent>? chunkEvents,
+    void Function()? checkStop,
+  ) async {
     var imageKey = imageFavorite.imageKey;
-    var localImage = await getImageFromLocal();
+    final localKey = await _localImageKey();
     checkStop?.call();
-    if (localImage != null) {
-      return localImage;
+    if (localKey != null) {
+      return (
+        imageKey: localKey,
+        bytes: await File(localKey.substring(7)).readAsBytes(),
+      );
     }
     var cacheImage = await readFromCache();
     checkStop?.call();
     if (cacheImage != null) {
-      return cacheImage;
+      return (imageKey: imageKey, bytes: cacheImage);
     }
     var gotImageKey = false;
     if (imageKey == "") {
@@ -61,7 +95,7 @@ class ImageFavoritesProvider
       }
     }
     await writeToCache(image);
-    return image;
+    return (imageKey: imageKey, bytes: image);
   }
 
   Future<void> writeToCache(Uint8List image) async {
@@ -84,30 +118,32 @@ class ImageFavoritesProvider
 
   /// Delete a image favorite cache
   static Future<void> deleteFromCache(ImageFavorite imageFavorite) async {
-    var fileName = md5.convert(imageFavorite.imageKey.codeUnits).toString();
+    var fileName = md5
+        .convert(ImageFavoritesProvider(imageFavorite).key.codeUnits)
+        .toString();
     var file = File(FilePath.join(App.cachePath, 'image_favorites', fileName));
     if (file.existsSync()) {
       await file.delete();
     }
   }
 
-  Future<Uint8List?> getImageFromLocal() async {
-    var localComic =
-        LocalManager().find(sourceKey, ComicType.fromKey(sourceKey));
-    if (localComic == null) {
+  Future<String?> _localImageKey() async {
+    if (imageFavorite.imageKey.startsWith('file://') &&
+        await File(imageFavorite.imageKey.substring(7)).exists()) {
+      return imageFavorite.imageKey;
+    }
+    final type = ComicType.fromKey(sourceKey);
+    final comic = LocalManager().find(cid, type);
+    if (comic == null ||
+        (comic.hasChapters && !comic.downloadedChapters.contains(eid))) {
       return null;
     }
-    var epIndex = localComic.chapters?.ids.toList().indexOf(eid) ?? -1;
-    if (epIndex == -1 && localComic.hasChapters) {
-      return null;
-    }
-    var images = await LocalManager().getImages(
-      sourceKey,
-      ComicType.fromKey(sourceKey),
-      epIndex,
+    final images = await LocalManager().getImages(
+      cid,
+      type,
+      comic.hasChapters ? eid : 1,
     );
-    var data = await File(images[page]).readAsBytes();
-    return data;
+    return images.elementAtOrNull(page - 1);
   }
 
   Future<Uint8List> getImageFromNetwork(
@@ -115,14 +151,20 @@ class ImageFavoritesProvider
     StreamController<ImageChunkEvent>? chunkEvents,
     void Function()? checkStop,
   ) async {
-    await for (var progress
-        in ImageDownloader.loadComicImage(imageKey, sourceKey, cid, eid)) {
+    await for (var progress in ImageDownloader.loadComicImage(
+      imageKey,
+      sourceKey,
+      cid,
+      eid,
+    )) {
       checkStop?.call();
       if (chunkEvents != null) {
-        chunkEvents.add(ImageChunkEvent(
-          cumulativeBytesLoaded: progress.currentBytes,
-          expectedTotalBytes: progress.totalBytes,
-        ));
+        chunkEvents.add(
+          ImageChunkEvent(
+            cumulativeBytesLoaded: progress.currentBytes,
+            expectedTotalBytes: progress.totalBytes,
+          ),
+        );
       }
       if (progress.imageBytes != null) {
         return progress.imageBytes!;

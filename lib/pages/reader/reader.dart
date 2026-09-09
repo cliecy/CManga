@@ -19,7 +19,6 @@ import 'package:venera/components/rich_comment_content.dart';
 import 'package:venera/components/window_frame.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
-import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/comic_type.dart';
 import 'package:venera/foundation/consts.dart';
@@ -28,6 +27,7 @@ import 'package:venera/foundation/global_state.dart';
 import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/image_provider/cached_image.dart';
 import 'package:venera/foundation/image_provider/reader_image.dart';
+import 'package:venera/foundation/image_provider/reader_image_details.dart';
 import 'package:venera/foundation/local.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/res.dart';
@@ -53,6 +53,8 @@ part 'images.dart';
 part 'gesture.dart';
 
 part 'comic_image.dart';
+
+part 'image_details.dart';
 
 part 'loading.dart';
 
@@ -799,7 +801,5 @@ abstract interface class _ImageViewController {
   /// Returns true if the event is handled.
   bool handleOnTap(Offset location);
 
-  Future<Uint8List?> getImageByOffset(Offset offset);
-
-  String? getImageKeyByOffset(Offset offset);
+  ReaderImageProvider? getImageProviderByOffset(Offset offset);
 }

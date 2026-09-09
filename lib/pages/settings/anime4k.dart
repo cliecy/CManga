@@ -23,11 +23,25 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
   String? _customModelName;
   List<String> _modelUrls = [];
   bool _usingCustom = false;
+  bool _isManaging = false;
+  bool get _busy => _isDownloading || _isManaging;
+
+  Future<void> _manageModel(Future<void> Function() action) async {
+    if (_busy) return;
+    setState(() => _isManaging = true);
+    try {
+      await action();
+    } catch (e) {
+      if (mounted) context.showMessage(message: e.toString());
+    } finally {
+      if (mounted) setState(() => _isManaging = false);
+    }
+  }
 
   @override
   void initState() {
     super.initState();
-    _refreshModelStatus();
+    _manageModel(_refreshModelStatus);
   }
 
   Future<void> _refreshModelStatus() async {
@@ -132,6 +146,7 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
   /// 选择本地 .onnx 模型文件（优先级高于内置下载模型）
   Future<void> _pickLocalModel() async {
     try {
+      final model = Anime4KV4ModelManager.selectedDef;
       final xFile = await file_selector.openFile(
         acceptedTypeGroups: <file_selector.XTypeGroup>[
           file_selector.XTypeGroup(label: 'ONNX Model', extensions: ['onnx']),
@@ -145,10 +160,7 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
         return;
       }
       final dir = await getApplicationSupportDirectory();
-      final targetPath = path.join(
-        dir.path,
-        Anime4KV4ModelManager.modelFileName,
-      );
+      final targetPath = path.join(dir.path, model.fileName);
       await ImageAiService.instance.installModelFile(
         xFile.path,
         targetPath,
@@ -157,7 +169,10 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
       );
 
       // 记账为自选模型 + 失效原生会话缓存 + 让服务立即感知新路径
-      await Anime4KV4ModelManager.markCustomModelActive(xFile.name);
+      await Anime4KV4ModelManager.markCustomModelActive(
+        xFile.name,
+        model: model,
+      );
       await Anime4KV4Service.instance.resetNativeSession();
       await Anime4KV4Service.instance.checkModelAvailable();
       await _refreshModelStatus();
@@ -243,7 +258,7 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
               },
             );
             if (confirm == true) {
-              await _downloadModel();
+              await _manageModel(_downloadModel);
               if (mounted &&
                   await Anime4KV4Service.instance.checkModelAvailable()) {
                 appdata.settings['enableAnime4K'] = true;
@@ -304,9 +319,11 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
                 children: Anime4KV4ModelManager.getModels().map((m) {
                   final selected = Anime4KV4ModelManager.selectedDef.id == m.id;
                   return ChoiceChip(
-                    label: Text("${m.scale}×  ${m.displayName}".tl),
+                    label: Text(m.displayName.tl),
                     selected: selected,
-                    onSelected: (_) => _selectModel(m.id),
+                    onSelected: _busy
+                        ? null
+                        : (_) => _manageModel(() => _selectModel(m.id)),
                   );
                 }).toList(),
               ),
@@ -393,6 +410,17 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
                         fontSize: 12,
                       ),
                     ),
+                    const SizedBox(height: 8),
+                    Text(Anime4KV4ModelManager.selectedDef.protocolNote.tl),
+                    const SizedBox(height: 8),
+                    Text(Anime4KV4ModelManager.selectedDef.licenseNote.tl),
+                    const SizedBox(height: 8),
+                    SelectableText(Anime4KV4ModelManager.selectedDef.sourceUrl),
+                    if (Anime4KV4ModelManager.legacySelectionMigrated)
+                      Text(
+                        'The retired general_x2 selection was migrated to RealESRGAN-x2plus. Download the new weights; old files and custom import records were not reused.'
+                            .tl,
+                      ),
                     if (_status.isNotEmpty) ...[
                       const SizedBox(height: 8),
                       Text(
@@ -408,42 +436,43 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
                       LinearProgressIndicator(value: _downloadProgress),
                     ],
                     const SizedBox(height: 12),
-                    if (!_usingCustom)
-                      Row(
-                        children: [
-                          if (!_isModelDownloaded)
-                            Expanded(
-                              child: ElevatedButton.icon(
-                                onPressed: _isDownloading
-                                    ? null
-                                    : _downloadModel,
-                                icon: _isDownloading
-                                    ? const SizedBox(
-                                        width: 16,
-                                        height: 16,
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                        ),
-                                      )
-                                    : const Icon(Icons.download),
-                                label: Text(
-                                  _isDownloading
-                                      ? "Downloading...".tl
-                                      : "Download Model".tl,
-                                ),
+                    Row(
+                      children: [
+                        if (!_isModelDownloaded)
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _manageModel(_downloadModel),
+                              icon: _isDownloading
+                                  ? const SizedBox(
+                                      width: 16,
+                                      height: 16,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Icon(Icons.download),
+                              label: Text(
+                                _isDownloading
+                                    ? "Downloading...".tl
+                                    : "Download Model".tl,
                               ),
                             ),
-                          if (_isModelDownloaded) ...[
-                            Expanded(
-                              child: OutlinedButton.icon(
-                                onPressed: _deleteModel,
-                                icon: const Icon(Icons.delete_outline),
-                                label: Text("Delete Model".tl),
-                              ),
+                          ),
+                        if (_isModelDownloaded) ...[
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _manageModel(_deleteModel),
+                              icon: const Icon(Icons.delete_outline),
+                              label: Text("Delete Model".tl),
                             ),
-                          ],
+                          ),
                         ],
-                      ),
+                      ],
+                    ),
                   ],
                 ),
               ),
@@ -478,16 +507,20 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
                       children: [
                         Expanded(
                           child: ElevatedButton.icon(
-                            onPressed: _pickLocalModel,
+                            onPressed: _busy
+                                ? null
+                                : () => _manageModel(_pickLocalModel),
                             icon: const Icon(Icons.folder_open),
                             label: Text("Select Model File".tl),
                           ),
                         ),
-                        if (_usingCustom) ...[
+                        if (_customModelName != null) ...[
                           const SizedBox(width: 8),
                           Expanded(
                             child: OutlinedButton.icon(
-                              onPressed: _clearCustomModel,
+                              onPressed: _busy
+                                  ? null
+                                  : () => _manageModel(_clearCustomModel),
                               icon: const Icon(Icons.restore),
                               label: Text("Use Built-in".tl),
                             ),
@@ -517,7 +550,7 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
             (e) => _MirrorUrlTile(
               index: e.key,
               url: e.value,
-              onDelete: _removeMirrorUrl,
+              onDelete: (index) => _manageModel(() => _removeMirrorUrl(index)),
             ),
           ),
           SliverToBoxAdapter(
@@ -527,7 +560,9 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
                 children: [
                   Expanded(
                     child: OutlinedButton.icon(
-                      onPressed: _addMirrorUrl,
+                      onPressed: _busy
+                          ? null
+                          : () => _manageModel(_addMirrorUrl),
                       icon: const Icon(Icons.add),
                       label: Text("Add Mirror URL".tl),
                     ),
@@ -535,10 +570,12 @@ class _Anime4KSettingsState extends State<Anime4KSettings> {
                   const SizedBox(width: 8),
                   Expanded(
                     child: OutlinedButton.icon(
-                      onPressed: () async {
-                        await Anime4KV4ModelManager.resetModelUrls();
-                        await _refreshModelStatus();
-                      },
+                      onPressed: _busy
+                          ? null
+                          : () => _manageModel(() async {
+                              await Anime4KV4ModelManager.resetModelUrls();
+                              await _refreshModelStatus();
+                            }),
                       icon: const Icon(Icons.restart_alt),
                       label: Text("Reset".tl),
                     ),

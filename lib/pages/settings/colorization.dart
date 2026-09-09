@@ -19,11 +19,25 @@ class _ColorizationSettingsState extends State<ColorizationSettings> {
   List<String> _modelUrls = [];
   bool _usingCustom = false;
   String _selectedVariant = 'deoldify';
+  bool _isManaging = false;
+  bool get _busy => _isDownloading || _isManaging;
+
+  Future<void> _manageModel(Future<void> Function() action) async {
+    if (_busy) return;
+    setState(() => _isManaging = true);
+    try {
+      await action();
+    } catch (e) {
+      if (mounted) context.showMessage(message: e.toString());
+    } finally {
+      if (mounted) setState(() => _isManaging = false);
+    }
+  }
 
   @override
   void initState() {
     super.initState();
-    _refreshModelStatus();
+    _manageModel(_refreshModelStatus);
   }
 
   Future<void> _refreshModelStatus() async {
@@ -43,17 +57,46 @@ class _ColorizationSettingsState extends State<ColorizationSettings> {
     }
   }
 
-  String get _selectedVariantLabel {
-    final v = ColorizationModelManager.modelVariants.firstWhere(
-      (e) => e.id == _selectedVariant,
-      orElse: () =>
-          const ColorizationModelVariant('deoldify', 'DeOldify Artistic'),
-    );
-    return v.label;
+  ColorizationModelVariant get _selectedDefinition =>
+      ColorizationModelManager.modelVariants.firstWhere(
+        (model) => model.id == _selectedVariant,
+        orElse: () => ColorizationModelManager.modelVariants.first,
+      );
+
+  Future<void> _selectModel(String id) async {
+    await ColorizationModelManager.setSelectedVariant(id);
+    await ColorizationService.instance.resetNativeSession();
+    await ColorizationService.instance.checkModelAvailable();
+    await _refreshModelStatus();
+    _refreshAiImages();
   }
 
   Future<void> _downloadModel() async {
     if (_isDownloading) return;
+    final model = _selectedDefinition;
+    if (!model.canDownload) return;
+    if (model.requiresNonCommercialConsent) {
+      final accepted = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => ContentDialog(
+          title: 'Non-commercial model license'.tl,
+          content: Text(
+            model.licenseNote.tl,
+          ).paddingHorizontal(16).fixWidth(double.infinity),
+          actions: [
+            Button.filled(
+              onPressed: () => dialogContext.pop(true),
+              child: Text('Accept non-commercial use only'.tl),
+            ),
+            Button.outlined(
+              onPressed: () => dialogContext.pop(false),
+              child: Text('Cancel'.tl),
+            ),
+          ],
+        ),
+      );
+      if (accepted != true || !mounted) return;
+    }
     setState(() {
       _isDownloading = true;
       _downloadProgress = 0.0;
@@ -62,7 +105,8 @@ class _ColorizationSettingsState extends State<ColorizationSettings> {
 
     try {
       await ColorizationModelManager.downloadModel(
-        variant: _selectedVariant,
+        variant: model.id,
+        nonCommercialAccepted: model.requiresNonCommercialConsent,
         onProgress: (progress) {
           if (mounted) {
             setState(() {
@@ -127,6 +171,7 @@ class _ColorizationSettingsState extends State<ColorizationSettings> {
   /// 选择本地 .onnx 模型文件（优先级高于内置下载模型）
   Future<void> _pickLocalModel() async {
     try {
+      final model = await ColorizationModelManager.getSelectedDefinition();
       final xFile = await file_selector.openFile(
         acceptedTypeGroups: <file_selector.XTypeGroup>[
           file_selector.XTypeGroup(label: 'ONNX Model', extensions: ['onnx']),
@@ -140,19 +185,19 @@ class _ColorizationSettingsState extends State<ColorizationSettings> {
         return;
       }
       final dir = await getApplicationSupportDirectory();
-      final targetPath = path.join(
-        dir.path,
-        ColorizationModelManager.modelFileName,
-      );
+      final targetPath = path.join(dir.path, model.fileName);
       await ImageAiService.instance.installModelFile(
         xFile.path,
         targetPath,
-        'deoldify',
+        model.type,
         preserveBackup: true,
       );
 
       // 记账为自选模型 + 失效原生会话缓存 + 让服务立即感知新路径
-      await ColorizationModelManager.markCustomModelActive(xFile.name);
+      await ColorizationModelManager.markCustomModelActive(
+        xFile.name,
+        model: model,
+      );
       await ColorizationService.instance.resetNativeSession();
       await ColorizationService.instance.checkModelAvailable();
       await _refreshModelStatus();
@@ -182,7 +227,7 @@ class _ColorizationSettingsState extends State<ColorizationSettings> {
     await showInputDialog(
       context: context,
       title: "Add Mirror URL".tl,
-      hintText: "https://.../deoldify.onnx",
+      hintText: 'https://.../${_selectedDefinition.fileName}',
       confirmText: "Add".tl,
       onConfirm: (url) async {
         await ColorizationModelManager.addModelUrl(url);
@@ -252,14 +297,14 @@ class _ColorizationSettingsState extends State<ColorizationSettings> {
                     children: [
                       Expanded(
                         child: Text(
-                          _selectedVariantLabel,
+                          _selectedDefinition.label.tl,
                           style: const TextStyle(fontWeight: FontWeight.bold),
                         ),
                       ),
                     ],
                   ),
                   const SizedBox(height: 8),
-                  // 模型变体选择器（仅切换下载源，推理逻辑不变）
+                  // Selection controls both the native pipeline and installation.
                   Wrap(
                     spacing: 8,
                     children: ColorizationModelManager.modelVariants.map((v) {
@@ -267,12 +312,9 @@ class _ColorizationSettingsState extends State<ColorizationSettings> {
                       return ChoiceChip(
                         label: Text(v.label.tl),
                         selected: selected,
-                        onSelected: (_) async {
-                          await ColorizationModelManager.setSelectedVariant(
-                            v.id,
-                          );
-                          await _refreshModelStatus();
-                        },
+                        onSelected: _busy
+                            ? null
+                            : (_) => _manageModel(() => _selectModel(v.id)),
                       );
                     }).toList(),
                   ),
@@ -280,14 +322,20 @@ class _ColorizationSettingsState extends State<ColorizationSettings> {
                   Text(
                     _isModelDownloaded
                         ? "Model downloaded".tl
-                        : (_selectedVariant == 'deoldify-int8'
-                              ? "Model not downloaded (lightweight)".tl
-                              : "Model not downloaded (~243MB)".tl),
+                        : 'Model not downloaded'.tl,
                     style: TextStyle(
                       color: context.colorScheme.onSurfaceVariant,
                       fontSize: 12,
                     ),
                   ),
+                  const SizedBox(height: 8),
+                  Text(_selectedDefinition.protocolNote.tl),
+                  const SizedBox(height: 8),
+                  Text(_selectedDefinition.licenseNote.tl),
+                  const SizedBox(height: 8),
+                  SelectableText(_selectedDefinition.sourceUrl),
+                  if (_selectedDefinition.sizeBytes != null)
+                    Text('${_selectedDefinition.sizeBytes} bytes'),
                   if (_status.isNotEmpty) ...[
                     const SizedBox(height: 8),
                     Text(
@@ -303,40 +351,44 @@ class _ColorizationSettingsState extends State<ColorizationSettings> {
                     LinearProgressIndicator(value: _downloadProgress),
                   ],
                   const SizedBox(height: 12),
-                  if (!_usingCustom)
-                    Row(
-                      children: [
-                        if (!_isModelDownloaded)
-                          Expanded(
-                            child: ElevatedButton.icon(
-                              onPressed: _isDownloading ? null : _downloadModel,
-                              icon: _isDownloading
-                                  ? const SizedBox(
-                                      width: 16,
-                                      height: 16,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                      ),
-                                    )
-                                  : const Icon(Icons.download),
-                              label: Text(
-                                _isDownloading
-                                    ? "Downloading...".tl
-                                    : "Download Model".tl,
-                              ),
+                  Row(
+                    children: [
+                      if (!_isModelDownloaded &&
+                          _selectedDefinition.canDownload)
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            onPressed: _busy
+                                ? null
+                                : () => _manageModel(_downloadModel),
+                            icon: _isDownloading
+                                ? const SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(Icons.download),
+                            label: Text(
+                              _isDownloading
+                                  ? "Downloading...".tl
+                                  : "Download Model".tl,
                             ),
                           ),
-                        if (_isModelDownloaded) ...[
-                          Expanded(
-                            child: OutlinedButton.icon(
-                              onPressed: _deleteModel,
-                              icon: const Icon(Icons.delete_outline),
-                              label: Text("Delete Model".tl),
-                            ),
+                        ),
+                      if (_isModelDownloaded) ...[
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: _busy
+                                ? null
+                                : () => _manageModel(_deleteModel),
+                            icon: const Icon(Icons.delete_outline),
+                            label: Text("Delete Model".tl),
                           ),
-                        ],
+                        ),
                       ],
-                    ),
+                    ],
+                  ),
                 ],
               ),
             ),
@@ -397,18 +449,22 @@ class _ColorizationSettingsState extends State<ColorizationSettings> {
                     children: [
                       Expanded(
                         child: ElevatedButton.icon(
-                          onPressed: _pickLocalModel,
+                          onPressed: _busy
+                              ? null
+                              : () => _manageModel(_pickLocalModel),
                           icon: const Icon(Icons.folder_open),
                           label: Text("Select Model File".tl),
                         ),
                       ),
-                      if (_usingCustom) ...[
+                      if (_customModelName != null) ...[
                         const SizedBox(width: 8),
                         Expanded(
                           child: OutlinedButton.icon(
-                            onPressed: _clearCustomModel,
+                            onPressed: _busy
+                                ? null
+                                : () => _manageModel(_clearCustomModel),
                             icon: const Icon(Icons.restore),
-                            label: Text("Use Built-in".tl),
+                            label: Text('Restore preset / remove import'.tl),
                           ),
                         ),
                       ],
@@ -420,52 +476,58 @@ class _ColorizationSettingsState extends State<ColorizationSettings> {
           ),
         ),
         // 镜像 URL 管理
-        SliverToBoxAdapter(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-            child: Text(
-              "Download Mirrors".tl,
-              style: TextStyle(
-                color: context.colorScheme.primary,
-                fontWeight: FontWeight.bold,
+        if (_selectedDefinition.canDownload) ...[
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+              child: Text(
+                "Download Mirrors".tl,
+                style: TextStyle(
+                  color: context.colorScheme.primary,
+                  fontWeight: FontWeight.bold,
+                ),
               ),
             ),
           ),
-        ),
-        ..._modelUrls.asMap().entries.map(
-          (e) => _MirrorUrlTile(
-            index: e.key,
-            url: e.value,
-            onDelete: _removeMirrorUrl,
-          ),
-        ),
-        SliverToBoxAdapter(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: _addMirrorUrl,
-                    icon: const Icon(Icons.add),
-                    label: Text("Add Mirror URL".tl),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: () async {
-                      await ColorizationModelManager.resetModelUrls();
-                      await _refreshModelStatus();
-                    },
-                    icon: const Icon(Icons.restart_alt),
-                    label: Text("Reset".tl),
-                  ),
-                ),
-              ],
+          ..._modelUrls.asMap().entries.map(
+            (e) => _MirrorUrlTile(
+              index: e.key,
+              url: e.value,
+              onDelete: (index) => _manageModel(() => _removeMirrorUrl(index)),
             ),
           ),
-        ),
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: _busy
+                          ? null
+                          : () => _manageModel(_addMirrorUrl),
+                      icon: const Icon(Icons.add),
+                      label: Text("Add Mirror URL".tl),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: _busy
+                          ? null
+                          : () => _manageModel(() async {
+                              await ColorizationModelManager.resetModelUrls();
+                              await _refreshModelStatus();
+                            }),
+                      icon: const Icon(Icons.restart_alt),
+                      label: Text("Reset".tl),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
         ListTile(
           title: Text("Clear Colorization Cache".tl),
           trailing: const Icon(Icons.delete_sweep),
