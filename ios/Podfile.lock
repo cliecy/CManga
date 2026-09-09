@@ -26,7 +26,6 @@ PODS:
     - FlutterMacOS
   - lodepng_flutter (0.0.1):
     - Flutter
-  - onnxruntime-c (1.22.0)
   - OrderedSet (6.0.3)
   - path_provider_foundation (0.0.1):
     - Flutter
@@ -62,8 +61,9 @@ PODS:
   - VeneraImageAI (1.0.0):
     - Flutter
     - FlutterMacOS
-    - onnxruntime-c (= 1.22.0)
+    - VeneraOnnxRuntime (= 1.29.0)
     - VeneraOpenCV (= 4.11.0)
+  - VeneraOnnxRuntime (1.29.0)
   - VeneraOpenCV (4.11.0)
   - zip_flutter (0.0.1):
     - Flutter
@@ -87,12 +87,12 @@ DEPENDENCIES:
   - sqlite3_flutter_libs (from `.symlinks/plugins/sqlite3_flutter_libs/darwin`)
   - url_launcher_ios (from `.symlinks/plugins/url_launcher_ios/ios`)
   - VeneraImageAI (from `../native`)
+  - VeneraOnnxRuntime (from `../build/apple-ort/ios/package`)
   - VeneraOpenCV (from `../native/VeneraOpenCV.podspec`)
   - zip_flutter (from `.symlinks/plugins/zip_flutter/ios`)
 
 SPEC REPOS:
   trunk:
-    - onnxruntime-c
     - OrderedSet
     - sqlite3
 
@@ -133,6 +133,8 @@ EXTERNAL SOURCES:
     :path: ".symlinks/plugins/url_launcher_ios/ios"
   VeneraImageAI:
     :path: "../native"
+  VeneraOnnxRuntime:
+    :path: "../build/apple-ort/ios/package"
   VeneraOpenCV:
     :podspec: "../native/VeneraOpenCV.podspec"
   zip_flutter:
@@ -150,7 +152,6 @@ SPEC CHECKSUMS:
   flutter_qjs: 25bb018feca5a6c80396f1ab1a27f7724892e89e
   local_auth_darwin: 553ce4f9b16d3fdfeafce9cf042e7c9f77c1c391
   lodepng_flutter: 89b9ed92ebfc450d86387d76068e9a20ab6fc3a7
-  onnxruntime-c: 7f778680e96145956c0a31945f260321eed2611a
   OrderedSet: e539b66b644ff081c73a262d24ad552a69be3a94
   path_provider_foundation: 080d55be775b7414fd5a5ef3ac137b97b097e564
   rhttp: 359daed992674fc912552df3106bfbc746bcc929
@@ -159,10 +160,11 @@ SPEC CHECKSUMS:
   sqlite3: 3c950dc86011117c307eb0b28c4a7bb449dce9f1
   sqlite3_flutter_libs: 3c323550ef3b928bc0aa9513c841e45a7d242832
   url_launcher_ios: 694010445543906933d732453a59da0a173ae33d
-  VeneraImageAI: 02fe51dabaae4a9e6139ac849b69eea02dfec186
+  VeneraImageAI: cc4f9d770095a1cb75dff344d8b00879139ac924
+  VeneraOnnxRuntime: 10f0c82ace63d952d2b54ef619f1ef35901af8ad
   VeneraOpenCV: 955dd73325b65851dca44f5ddf3be2d0d52513a0
   zip_flutter: 452447e26d7e66c88fc582ad7ad86fcee39c7b53
 
-PODFILE CHECKSUM: 5493e47901707ac15eb44fe7bd810af8db33585d
+PODFILE CHECKSUM: 814d941de3fdf31fc87fd1a22bcd478f61a55e75
 
 COCOAPODS: 1.17.0
