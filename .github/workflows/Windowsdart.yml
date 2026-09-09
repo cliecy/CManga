@@ -58,8 +58,8 @@ jobs:
           $image.Save("$pwd/build/ai-smoke-results/input.png", [System.Drawing.Imaging.ImageFormat]::Png)
           $image.Dispose()
           $smoke = Resolve-Path build/windows/x64/Release/venera_image_ai_smoke.exe
-          $arguments = @('--model', 'assets/models/anime4k_acnet.onnx', '--image', 'build/ai-smoke-results/input.png', '--type', 'esrgan', '--backend', 'cpu', '--scale', '1.3', '--strength', '1', '--intensity', '1')
-          & $smoke @arguments --output build/ai-smoke-results/cpu.png --renders 3 --check-strength true | Tee-Object build/ai-smoke-results/cpu.jsonl
+          $arguments = @('--model', 'assets/models/anime4k_acnet.onnx', '--image', 'build/ai-smoke-results/input.png', '--type', 'esrgan', '--scale', '1.3', '--strength', '1', '--intensity', '1')
+          & $smoke @arguments --backend cpu --output build/ai-smoke-results/cpu.png --renders 3 --check-strength true | Tee-Object build/ai-smoke-results/cpu.jsonl
           if ($LASTEXITCODE -ne 0) { throw 'ACNet CPU inference failed' }
           $results = @(Get-Content build/ai-smoke-results/cpu.jsonl | ForEach-Object { $_ | ConvertFrom-Json })
           if ($results.Count -ne 3 -or $results[0].backend -ne 'cpu' -or $results[0].inferenceRuns -lt 1) { throw 'Smoke did not execute the CPU model' }
