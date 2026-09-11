@@ -21,7 +21,7 @@ TRANSLATION_SHA256 = "bf0751fa176569c6faa2f6e17ed2734617bef325d5cc06eae030fdd025
 
 def verify_bundle(bundle: Path, arch: str) -> None:
     required = (
-        "venera.exe", "flutter_windows.dll", "onnxruntime.dll",
+        "cmanga.exe", "flutter_windows.dll", "onnxruntime.dll",
         "onnxruntime_providers_shared.dll", "vcruntime140.dll", "msvcp140.dll",
         "image_ai/directml/onnxruntime.dll",
         "image_ai/directml/onnxruntime_providers_shared.dll",
@@ -85,7 +85,7 @@ def build(arch: str = "x64") -> None:
         raise RuntimeError("pubspec.yaml has no version")
     version = version_match.group(1)
     suffix = "-arm64" if arch == "arm64" else ""
-    archive = ROOT / "build" / "windows" / f"Venera-{version}-windows{suffix}"
+    archive = ROOT / "build" / "windows" / f"cmanga-windows-{version}{suffix}"
     shutil.make_archive(str(archive), "zip", bundle)
     if args.zip_only:
         return

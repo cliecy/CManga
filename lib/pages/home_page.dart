@@ -1,25 +1,25 @@
 import 'package:flutter/material.dart';
 import 'package:sliver_tools/sliver_tools.dart';
 import 'package:url_launcher/url_launcher_string.dart';
-import 'package:venera/components/components.dart';
-import 'package:venera/foundation/app.dart';
-import 'package:venera/foundation/comic_source/comic_source.dart';
-import 'package:venera/foundation/consts.dart';
-import 'package:venera/foundation/favorites.dart';
-import 'package:venera/foundation/history.dart';
-import 'package:venera/foundation/local.dart';
-import 'package:venera/foundation/log.dart';
-import 'package:venera/pages/comic_details_page/comic_page.dart';
-import 'package:venera/pages/comic_source_page.dart';
-import 'package:venera/pages/downloading_page.dart';
-import 'package:venera/pages/follow_updates_page.dart';
-import 'package:venera/pages/history_page.dart';
-import 'package:venera/pages/image_favorites_page/image_favorites_page.dart';
-import 'package:venera/pages/search_page.dart';
-import 'package:venera/utils/data_sync.dart';
-import 'package:venera/utils/import_comic.dart';
-import 'package:venera/utils/tags_translation.dart';
-import 'package:venera/utils/translations.dart';
+import 'package:cmanga/components/components.dart';
+import 'package:cmanga/foundation/app.dart';
+import 'package:cmanga/foundation/comic_source/comic_source.dart';
+import 'package:cmanga/foundation/consts.dart';
+import 'package:cmanga/foundation/favorites.dart';
+import 'package:cmanga/foundation/history.dart';
+import 'package:cmanga/foundation/local.dart';
+import 'package:cmanga/foundation/log.dart';
+import 'package:cmanga/pages/comic_details_page/comic_page.dart';
+import 'package:cmanga/pages/comic_source_page.dart';
+import 'package:cmanga/pages/downloading_page.dart';
+import 'package:cmanga/pages/follow_updates_page.dart';
+import 'package:cmanga/pages/history_page.dart';
+import 'package:cmanga/pages/image_favorites_page/image_favorites_page.dart';
+import 'package:cmanga/pages/search_page.dart';
+import 'package:cmanga/utils/data_sync.dart';
+import 'package:cmanga/utils/import_comic.dart';
+import 'package:cmanga/utils/tags_translation.dart';
+import 'package:cmanga/utils/translations.dart';
 
 import 'local_comics_page.dart';
 
@@ -31,6 +31,7 @@ class HomePage extends StatelessWidget {
     var widget = SmoothCustomScrollView(
       slivers: [
         SliverPadding(padding: EdgeInsets.only(top: context.padding.top)),
+        const _WelcomeHeader(),
         const _SearchBar(),
         const _SyncDataWidget(),
         const _History(),
@@ -42,6 +43,77 @@ class HomePage extends StatelessWidget {
       ],
     );
     return context.width > changePoint ? widget.paddingHorizontal(8) : widget;
+  }
+}
+
+class _WelcomeHeader extends StatelessWidget {
+  const _WelcomeHeader();
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colorScheme;
+    return SliverToBoxAdapter(
+      child: Container(
+        margin: const EdgeInsets.fromLTRB(8, 12, 8, 4),
+        padding: const EdgeInsets.all(24),
+        decoration: BoxDecoration(
+          color: colors.surfaceContainerLow,
+          borderRadius: BorderRadius.circular(24),
+          border: Border.all(color: colors.outlineVariant),
+        ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final compact = constraints.maxWidth < 420;
+            final identity = Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'CManga',
+                  style: Theme.of(context).textTheme.headlineLarge?.copyWith(
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: -1,
+                    color: colors.onSurface,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'A little space for big stories.'.tl,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleMedium?.copyWith(color: colors.primary),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  'Pick up where you left off, or find your next favorite.'.tl,
+                  style: TextStyle(color: colors.onSurfaceVariant),
+                ),
+              ],
+            );
+            final mark = ClipRRect(
+              borderRadius: BorderRadius.circular(20),
+              child: Image.asset(
+                'assets/app_icon.png',
+                width: compact ? 64 : 96,
+                height: compact ? 64 : 96,
+              ),
+            );
+            return compact
+                ? Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [mark, const SizedBox(height: 16), identity],
+                  )
+                : Row(
+                    children: [
+                      Expanded(child: identity),
+                      const SizedBox(width: 24),
+                      mark,
+                    ],
+                  );
+          },
+        ),
+      ),
+    );
   }
 }
 

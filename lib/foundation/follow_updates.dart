@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
-import 'package:venera/foundation/favorites.dart';
-import 'package:venera/foundation/log.dart';
-import 'package:venera/utils/channel.dart';
+import 'package:cmanga/foundation/favorites.dart';
+import 'package:cmanga/foundation/log.dart';
+import 'package:cmanga/utils/channel.dart';
 
 class ComicUpdateResult {
   final bool updated;

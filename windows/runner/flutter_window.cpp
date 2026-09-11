@@ -86,7 +86,7 @@ bool FlutterWindow::OnCreate() {
       flutter_controller_->engine()->messenger(), GetHandle());
 
   const flutter::MethodChannel<> channel(
-      flutter_controller_->engine()->messenger(), "venera/method_channel",
+      flutter_controller_->engine()->messenger(), "cmanga/method_channel",
       &flutter::StandardMethodCodec::GetInstance()
   );
   channel.SetMethodCallHandler(
@@ -117,7 +117,7 @@ bool FlutterWindow::OnCreate() {
   });
 
   flutter::EventChannel<> channel2(
-    flutter_controller_->engine()->messenger(), "venera/mouse",
+    flutter_controller_->engine()->messenger(), "cmanga/mouse",
     &flutter::StandardMethodCodec::GetInstance()
   );
 
@@ -139,7 +139,7 @@ bool FlutterWindow::OnCreate() {
   channel2.SetStreamHandler(std::move(eventHandler));
 
   const flutter::MethodChannel<> channel3(
-    flutter_controller_->engine()->messenger(), "venera/clipboard",
+    flutter_controller_->engine()->messenger(), "cmanga/clipboard",
     &flutter::StandardMethodCodec::GetInstance()
   );
   channel3.SetMethodCallHandler(

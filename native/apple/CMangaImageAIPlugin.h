@@ -6,6 +6,6 @@
 #endif
 
 NS_ASSUME_NONNULL_BEGIN
-@interface VeneraImageAIPlugin : NSObject <FlutterPlugin>
+@interface CMangaImageAIPlugin : NSObject <FlutterPlugin>
 @end
 NS_ASSUME_NONNULL_END

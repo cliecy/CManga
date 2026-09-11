@@ -3,17 +3,17 @@ import 'dart:isolate';
 
 import 'package:flutter/widgets.dart' show ChangeNotifier;
 import 'package:flutter_saf/flutter_saf.dart';
-import 'package:venera/foundation/app.dart';
-import 'package:venera/foundation/appdata.dart';
-import 'package:venera/foundation/comic_source/comic_source.dart';
-import 'package:venera/foundation/comic_type.dart';
-import 'package:venera/foundation/local.dart';
-import 'package:venera/foundation/log.dart';
-import 'package:venera/foundation/res.dart';
-import 'package:venera/network/images.dart';
-import 'package:venera/utils/ext.dart';
-import 'package:venera/utils/file_type.dart';
-import 'package:venera/utils/io.dart';
+import 'package:cmanga/foundation/app.dart';
+import 'package:cmanga/foundation/appdata.dart';
+import 'package:cmanga/foundation/comic_source/comic_source.dart';
+import 'package:cmanga/foundation/comic_type.dart';
+import 'package:cmanga/foundation/local.dart';
+import 'package:cmanga/foundation/log.dart';
+import 'package:cmanga/foundation/res.dart';
+import 'package:cmanga/network/images.dart';
+import 'package:cmanga/utils/ext.dart';
+import 'package:cmanga/utils/file_type.dart';
+import 'package:cmanga/utils/io.dart';
 import 'package:zip_flutter/zip_flutter.dart';
 
 import 'file_downloader.dart';

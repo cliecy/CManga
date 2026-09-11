@@ -7,7 +7,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as path;
-import 'package:venera/foundation/appdata.dart';
+import 'package:cmanga/foundation/appdata.dart';
 import 'image_ai_cache.dart';
 
 @immutable
@@ -59,7 +59,7 @@ class ImageAiService {
   ImageAiService._();
   static final instance = ImageAiService._();
   static const _channel = MethodChannel(
-    'com.github.kiastr.venera_ssr/colorize',
+    'com.cmanga.reader/colorize',
   );
   final status = ValueNotifier<ImageAiStatus>(
     const ImageAiStatus(message: 'AI has not been initialized'),

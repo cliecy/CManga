@@ -1,5 +1,5 @@
 # ============================================================
-# Venera 图像上色（Colorization）原生依赖混淆保留规则
+# CManga 图像上色（Colorization）原生依赖混淆保留规则
 # release 构建 minifyEnabled=true + shrinkResources=true，
 # 必须保留 ONNX Runtime / OpenCV 的 Java 类与 JNI 入口，否则运行期
 # 会 NoClassDefFoundError / UnsatisfiedLinkError。
@@ -17,7 +17,7 @@
 -dontwarn org.opencv.**
 
 # 上色插件与方法通道（防止 R8 误删未被直接引用的入口）
--keep class com.github.kiastr.venera_ssr.colorize.** { *; }
+-keep class com.cmanga.reader.colorize.** { *; }
 
 # ============================================================
 # Flutter embedding（PlayStoreDeferredComponentManager /

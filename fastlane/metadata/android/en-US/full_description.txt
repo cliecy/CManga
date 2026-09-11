@@ -1,4 +1,4 @@
-<p>A comic reader that support reading local and network comics.</p>
+<p>CManga brings local and network comics into one reader, with on-device image enhancement, colorization and text translation.</p>
 <h3>Features</h3>
 <ul>
 <li>Read local comics</li>
@@ -6,10 +6,14 @@
 <li>Read comics from network sources</li>
 <li>Manage favorite comics</li>
 <li>Download comics</li>
+<li>Enhance comic images with Anime4K and compatible local ONNX models</li>
+<li>Colorize black-and-white pages and translate embedded text locally</li>
+<li>Sync your library using WebDAV and export your data</li>
 <li>View comments, tags, and other information of comics if the source supports</li>
 <li>Login to comment, rate, and other operations if the source supports</li>
 </ul>
 <h3>Thanks</h3>
+<p>CManga is an independent app based on open-source reader work, including <a href="https://github.com/venera-app/venera">Venera</a>. It uses its own app identity and storage. Model downloads may have separate licenses and device requirements; network sources require connectivity.</p>
 <h4>Tags Translation</h4>
 <li><a href="https://github.com/EhTagTranslation/Database">github.com/EhTagTranslation/Database</a></li>
 <p>The Chinese translation of the manga tags is from this project.</p>

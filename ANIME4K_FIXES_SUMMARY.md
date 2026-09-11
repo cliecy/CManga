@@ -1,8 +1,8 @@
-# Anime4K 移植修复总结
+# CManga Anime4K 移植修复历史
 
 ## 项目概述
 
-本文档总结了从 JhentaiSR 项目向 Venera 项目移植 Anime4K 超分辨率模块时所进行的所有修复和优化。
+本文档保留 CManga 所继承的、从 JhentaiSR 移植 Anime4K v1 模块时的修复记录。下文的完成状态、接口示例和建议属于当时的集成阶段；当前原生 AI、缓存和构建方式请参见 [README](README.md)。
 
 ## 移植清单
 
@@ -16,7 +16,7 @@
 
 **问题描述**：
 - JhentaiSR 使用 `log.debug()` 和 `log.error()` 方式
-- Venera 使用 `Log.info()` 和 `Log.error()` 方式（大写 L，静态方法）
+- CManga 使用 `Log.info()` 和 `Log.error()` 方式（大写 L，静态方法）
 
 **修复位置**：`lib/utils/anime4k/anime4k_service.dart`
 
@@ -31,7 +31,7 @@
 // 原始（JhentaiSR）
 log.error('Anime4K cache init error: $e');
 
-// 修复后（Venera）
+// 修复后（CManga 使用的日志 API）
 Log.error('Anime4K', 'Anime4K cache init error: $e');
 ```
 
@@ -296,7 +296,7 @@ testWidgets('Comic image with Anime4K', (WidgetTester tester) async {
 
 ### Q1：为什么需要修改日志调用？
 
-**A**：因为 JhentaiSR 和 Venera 使用不同的日志系统。JhentaiSR 使用 `log` 对象（小写），而 Venera 使用 `Log` 类（大写）的静态方法。
+**A**：因为 JhentaiSR 和 CManga 使用不同的日志系统。JhentaiSR 使用 `log` 对象（小写），而 CManga 使用 `Log` 类（大写）的静态方法。
 
 ### Q2：超分处理会影响性能吗？
 
@@ -314,14 +314,14 @@ testWidgets('Comic image with Anime4K', (WidgetTester tester) async {
 
 ## 总结
 
-本次移植成功将 Anime4K 超分辨率模块从 JhentaiSR 集成到 Venera，并修复了以下关键问题：
+CManga 保留的原始移植将 Anime4K v1 模块从 JhentaiSR 集成到阅读器，并修复了以下关键问题：
 
 1. ✅ 日志调用方式统一
 2. ✅ 变量定义和访问方式修正
 3. ✅ Android 签名配置优化
 4. ✅ 完整的集成和使用文档
 
-所有修改都遵循 Venera 项目的代码风格和架构规范，确保代码质量和可维护性。
+这些记录说明了 CManga 所继承的模块如何适配阅读器的代码风格和架构。
 
 ---
 

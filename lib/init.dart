@@ -5,22 +5,22 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_saf/flutter_saf.dart';
 import 'package:rhttp/rhttp.dart';
-import 'package:venera/foundation/app.dart';
-import 'package:venera/foundation/cache_manager.dart';
-import 'package:venera/foundation/comic_source/comic_source.dart';
-import 'package:venera/foundation/js_engine.dart';
-import 'package:venera/foundation/log.dart';
-import 'package:venera/network/cookie_jar.dart';
-import 'package:venera/pages/comic_source_page.dart';
-import 'package:venera/pages/follow_updates_page.dart';
-import 'package:venera/utils/app_links.dart';
-import 'package:venera/utils/handle_text_share.dart';
-import 'package:venera/utils/anime4k/anime4k_service.dart';
-import 'package:venera/utils/anime4k/anime4k_v4_service.dart';
-import 'package:venera/utils/colorization/colorization_service.dart';
-import 'package:venera/utils/opencc.dart';
-import 'package:venera/utils/tags_translation.dart';
-import 'package:venera/utils/translations.dart';
+import 'package:cmanga/foundation/app.dart';
+import 'package:cmanga/foundation/cache_manager.dart';
+import 'package:cmanga/foundation/comic_source/comic_source.dart';
+import 'package:cmanga/foundation/js_engine.dart';
+import 'package:cmanga/foundation/log.dart';
+import 'package:cmanga/network/cookie_jar.dart';
+import 'package:cmanga/pages/comic_source_page.dart';
+import 'package:cmanga/pages/follow_updates_page.dart';
+import 'package:cmanga/utils/app_links.dart';
+import 'package:cmanga/utils/handle_text_share.dart';
+import 'package:cmanga/utils/anime4k/anime4k_service.dart';
+import 'package:cmanga/utils/anime4k/anime4k_v4_service.dart';
+import 'package:cmanga/utils/colorization/colorization_service.dart';
+import 'package:cmanga/utils/opencc.dart';
+import 'package:cmanga/utils/tags_translation.dart';
+import 'package:cmanga/utils/translations.dart';
 import 'foundation/appdata.dart';
 
 extension _FutureInit<T> on Future<T> {
@@ -75,7 +75,7 @@ Future<void> init() async {
     // Report to the monitor thread that the app is running
     // https://github.com/venera-app/venera/issues/343
     Timer.periodic(const Duration(seconds: 1), (_) {
-      const methodChannel = MethodChannel('venera/method_channel');
+      const methodChannel = MethodChannel('cmanga/method_channel');
       methodChannel.invokeMethod("heartBeat");
     });
   }

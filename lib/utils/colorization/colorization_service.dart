@@ -1,7 +1,7 @@
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:venera/utils/image_ai_service.dart';
+import 'package:cmanga/utils/image_ai_service.dart';
 
 import 'colorization_processor.dart';
 

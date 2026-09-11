@@ -33,7 +33,7 @@ if (hasKeystore) {
 }
 
 android {
-    namespace = "com.github.kiastr.venera_ssr"
+    namespace = "com.cmanga.reader"
     compileSdk = flutter.compileSdkVersion
     ndkVersion "28.0.13004108"
 
@@ -89,7 +89,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.github.kiastr.venera_ssr"
+        applicationId = "com.cmanga.reader"
         // You can update the following values to match your application needs.
         // For more information, see: https://docs.flutter.dev/deployment/android#reviewing-the-gradle-build-configuration.
         minSdk = 24 // onnxruntime requires API 21+; using 24 for better native lib compatibility
@@ -122,13 +122,13 @@ android {
             def abi = output.getFilter(com.android.build.OutputFile.ABI)
             if (variant.buildType.name == "release") {
                 if (abi != null) {
-                    outputFileName = "venera-${variant.versionName}-${abi}.apk"
+                    outputFileName = "cmanga-${variant.versionName}-${abi}.apk"
                     def abiVersionCode = project.ext.abiCodes.get(abi)
                     if (abiVersionCode != null) {
                         versionCodeOverride = variant.versionCode * 10 + abiVersionCode
                     }
                 } else {
-                    outputFileName = "venera-${variant.versionName}.apk"
+                    outputFileName = "cmanga-${variant.versionName}.apk"
                     versionCodeOverride = variant.versionCode * 10
                 }
             } else if (variant.buildType.name == "debug") {

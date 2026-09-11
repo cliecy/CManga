@@ -1,6 +1,6 @@
 import Cocoa
 import FlutterMacOS
-import VeneraImageAI
+import CMangaImageAI
 
 class MainFlutterWindow: NSWindow {
   override func awakeFromNib() {
@@ -10,7 +10,7 @@ class MainFlutterWindow: NSWindow {
     self.setFrame(windowFrame, display: true)
 
     RegisterGeneratedPlugins(registry: flutterViewController)
-    VeneraImageAIPlugin.register(with: flutterViewController.registrar(forPlugin: "VeneraImageAIPlugin"))
+    CMangaImageAIPlugin.register(with: flutterViewController.registrar(forPlugin: "CMangaImageAIPlugin"))
 
     super.awakeFromNib()
   }

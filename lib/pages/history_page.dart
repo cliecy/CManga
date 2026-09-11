@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:venera/components/components.dart';
-import 'package:venera/foundation/app.dart';
-import 'package:venera/foundation/comic_source/comic_source.dart';
-import 'package:venera/foundation/comic_type.dart';
-import 'package:venera/foundation/history.dart';
-import 'package:venera/utils/translations.dart';
+import 'package:cmanga/components/components.dart';
+import 'package:cmanga/foundation/app.dart';
+import 'package:cmanga/foundation/comic_source/comic_source.dart';
+import 'package:cmanga/foundation/comic_type.dart';
+import 'package:cmanga/foundation/history.dart';
+import 'package:cmanga/utils/translations.dart';
 
 class HistoryPage extends StatefulWidget {
   const HistoryPage({super.key});

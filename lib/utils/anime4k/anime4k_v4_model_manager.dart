@@ -5,9 +5,9 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:venera/foundation/log.dart';
-import 'package:venera/utils/image_ai_service.dart';
-import 'package:venera/utils/model_download.dart';
+import 'package:cmanga/foundation/log.dart';
+import 'package:cmanga/utils/image_ai_service.dart';
+import 'package:cmanga/utils/model_download.dart';
 
 /// 单个 v4 超分模型的定义。
 ///
@@ -472,7 +472,7 @@ class Anime4KV4ModelManager {
       final uri = Uri.parse(url);
       final request = await client.getUrl(uri);
       request.followRedirects = true;
-      request.headers.set('User-Agent', 'Venera/1.0');
+      request.headers.set('User-Agent', 'CManga/1.0');
       request.headers.set('Accept', '*/*');
       request.headers.set('Connection', 'keep-alive');
       if (startByte > 0) {

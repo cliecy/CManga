@@ -1,8 +1,8 @@
-import 'package:venera/foundation/app.dart';
-import 'package:venera/foundation/image_provider/reader_image.dart';
-import 'package:venera/foundation/local.dart';
-import 'package:venera/utils/file_type.dart';
-import 'package:venera/utils/io.dart';
+import 'package:cmanga/foundation/app.dart';
+import 'package:cmanga/foundation/image_provider/reader_image.dart';
+import 'package:cmanga/foundation/local.dart';
+import 'package:cmanga/utils/file_type.dart';
+import 'package:cmanga/utils/io.dart';
 
 /// Prepares explicit book exports on the main isolate, where AI platform
 /// channels and the reader's per-comic settings are available.

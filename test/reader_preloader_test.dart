@@ -7,11 +7,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/services.dart';
 import 'package:crypto/crypto.dart';
 import 'package:image/image.dart' as img;
-import 'package:venera/utils/image_ai_cache.dart';
-import 'package:venera/foundation/image_provider/reader_image.dart';
-import 'package:venera/foundation/image_provider/reader_image_details.dart';
-import 'package:venera/foundation/image_provider/reader_preloader.dart';
-import 'package:venera/utils/image_ai_service.dart';
+import 'package:cmanga/utils/image_ai_cache.dart';
+import 'package:cmanga/foundation/image_provider/reader_image.dart';
+import 'package:cmanga/foundation/image_provider/reader_image_details.dart';
+import 'package:cmanga/foundation/image_provider/reader_preloader.dart';
+import 'package:cmanga/utils/image_ai_service.dart';
 
 class _Attempt {
   final result = Completer<Uint8List>();

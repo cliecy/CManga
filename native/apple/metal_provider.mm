@@ -7,7 +7,7 @@
 
 // Only the pinned, patched Apple framework exports this attestation. A generic
 // CPU-only ORT binary must not be mistaken for WebGPU because its headers match.
-extern "C" int VeneraOrtMetalStatus(char*, size_t, char*, size_t)
+extern "C" int CMangaOrtMetalStatus(char*, size_t, char*, size_t)
     __attribute__((weak_import));
 
 namespace image_ai {
@@ -23,7 +23,7 @@ void Check(const OrtApi* api, OrtStatus* status) {
 const OrtApi* MetalApi() {
   const OrtApiBase* base = OrtGetApiBase();
   const OrtApi* api = base ? base->GetApi(ORT_API_VERSION) : nullptr;
-  if (!api || !VeneraOrtMetalStatus) {
+  if (!api || !CMangaOrtMetalStatus) {
     throw Error("backend_unavailable", "The native ONNX Runtime Metal dependency is missing or incompatible.");
   }
   if (std::strcmp(base->GetVersionString(), "1.29.0") != 0) {
@@ -35,8 +35,8 @@ const OrtApi* MetalApi() {
 std::string DeviceName() {
   std::array<char, 1024> name{};
   std::array<char, 2048> reason{};
-  if (!VeneraOrtMetalStatus ||
-      !VeneraOrtMetalStatus(name.data(), name.size(), reason.data(), reason.size())) {
+  if (!CMangaOrtMetalStatus ||
+      !CMangaOrtMetalStatus(name.data(), name.size(), reason.data(), reason.size())) {
     throw Error("backend_unavailable", reason[0] ? reason.data() : "No hardware Metal adapter is available.");
   }
   return name.data();

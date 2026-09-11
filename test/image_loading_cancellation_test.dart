@@ -5,7 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
-import 'package:venera/foundation/image_provider/base_image_provider.dart';
+import 'package:cmanga/foundation/image_provider/base_image_provider.dart';
 
 class ControlledImage extends BaseImageProvider<ControlledImage> {
   ControlledImage(this.key);

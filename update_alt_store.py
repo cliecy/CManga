@@ -1,150 +1,163 @@
+"""Generate an AltStore source from verified CManga IPAs in a configured repository."""
+
 import json
+import os
 import plistlib
 import re
-import requests
-import os
-from datetime import datetime
+import shutil
+import sys
+import tempfile
+import zipfile
+from pathlib import Path
+from urllib.parse import quote, unquote, urlparse
+from urllib.request import Request, urlopen
 
-def prepare_description(text):
-    text = re.sub('<[^<]+?>', '', text) # Remove HTML tags
-    text = re.sub(r'#{1,6}\s?', '', text) # Remove markdown header tags
-    text = re.sub(r'\*{2}', '', text) # Remove all occurrences of two consecutive asterisks
-    text = re.sub(r'(?<=\r|\n)-', '•', text) # Only replace - with • if it is preceded by \r or \n
-    text = re.sub(r'`', '"', text) # Replace ` with "
-    text = re.sub(r'\r\n\r\n', '\r \n', text) # Replace \r\n\r\n with \r \n (avoid incorrect display of the description regarding paragraphs)
-    return text
+BUNDLE_ID = "com.cmanga.reader"
+IPA_NAME = re.compile(r"cmanga-ios-(\d+\.\d+\.\d+)\+(\d+)\.ipa")
 
-def fetch_latest_release(repo_url):
-    api_url = f"https://api.github.com/repos/{repo_url}/releases"
-    headers = {
-        "Accept": "application/vnd.github+json",
-    }
-    try:
-        response = requests.get(api_url, headers=headers)
-        response.raise_for_status()
-        release = response.json()
-        return release
-    except requests.RequestException as e:
-        print(f"Error fetching releases: {e}")
-        raise
 
-def get_file_size(url):
-    try:
-        response = requests.head(url)
-        response.raise_for_status()
-        return int(response.headers.get('Content-Length', 0))
-    except requests.RequestException as e:
-        print(f"Error getting file size: {e}")
-        return 194586
+def configured_repository():
+    repository = os.environ.get("CMANGA_RELEASE_REPOSITORY") or os.environ.get("GITHUB_REPOSITORY")
+    if not repository or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        raise ValueError("Set CMANGA_RELEASE_REPOSITORY=owner/repo (or GITHUB_REPOSITORY in CI) to the real CManga release repository.")
+    return repository
 
-def update_json_file_release(json_file, latest_release):
-    if isinstance(latest_release, list) and latest_release:
-        latest_release = latest_release[0]
-    else:
-        print("Error getting latest release")
-        return
 
-    try:
-        with open(json_file, "r") as file:
-            data = json.load(file)
-    except json.JSONDecodeError as e:
-        print(f"Error reading JSON file: {e}")
-        data = {"apps": []}
-        raise
+def github_json(path):
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "CManga-AltStore"}
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    with urlopen(Request(f"https://api.github.com/{path}", headers=headers), timeout=60) as response:
+        return json.load(response)
 
-    app = data["apps"][0]
 
-    full_version = latest_release["tag_name"]
-    tag = latest_release["tag_name"]
-    # Extract version like 1.4.5 from tag, which may be like 'v1.4.5'
-    version_match = re.search(r"(\d+\.\d+\.\d+)", full_version)
-    if version_match:
-        version = version_match.group(1)
-    else:
-        print("Error: Could not parse version from tag_name.")
-        return
-    version_date = latest_release["published_at"]
-    date_obj = datetime.strptime(version_date, "%Y-%m-%dT%H:%M:%SZ")
-    version_date = date_obj.strftime("%Y-%m-%d")
+def fetch_releases(repository):
+    releases = []
+    page = 1
+    while True:
+        batch = github_json(f"repos/{repository}/releases?per_page=100&page={page}")
+        releases.extend(release for release in batch if not release["draft"] and not release["prerelease"])
+        if len(batch) < 100:
+            return sorted(releases, key=lambda release: release["published_at"], reverse=True)
+        page += 1
 
-    description = latest_release["body"]
-    description = prepare_description(description)
 
-    assets = latest_release.get("assets", [])
-    download_url = None
-    size = None
-    for asset in assets:
-        # venera-ios-1.4.5+145.ipa
-        if asset["name"] == f"venera-ios-{version}+{version.replace('.', '')}.ipa":
-            download_url = asset["browser_download_url"]
-            size = asset["size"]
-            break
-
-    if download_url is None or size is None:
-        print("Error: IPA file not found in release assets.")
-        return
-
-    version_entry = {
+def verified_ipa(repository, asset):
+    match = IPA_NAME.fullmatch(asset["name"])
+    if not match:
+        raise ValueError(f"Refusing non-CManga IPA asset: {asset['name']}")
+    version, build = match.groups()
+    url = asset["browser_download_url"]
+    parsed = urlparse(url)
+    if (parsed.scheme != "https" or parsed.netloc != "github.com"
+            or not unquote(parsed.path).startswith(f"/{repository}/releases/download/")
+            or unquote(parsed.path.rsplit("/", 1)[-1]) != asset["name"]):
+        raise ValueError(f"IPA URL does not belong to {repository}: {url}")
+    size = asset["size"]
+    if not isinstance(size, int) or size <= 0:
+        raise ValueError(f"Missing real IPA size for {asset['name']}")
+    # Read the distributed app, not just a filename that could disguise an upstream IPA.
+    with tempfile.TemporaryFile() as downloaded:
+        with urlopen(Request(url, headers={"User-Agent": "CManga-AltStore"}), timeout=120) as response:
+            shutil.copyfileobj(response, downloaded)
+        if downloaded.tell() != size:
+            raise ValueError(f"Downloaded IPA size disagrees with release metadata: {asset['name']}")
+        downloaded.seek(0)
+        with zipfile.ZipFile(downloaded) as archive:
+            manifests = [name for name in archive.namelist()
+                         if re.fullmatch(r"Payload/[^/]+\.app/Info\.plist", name)]
+            if len(manifests) != 1:
+                raise ValueError(f"Expected one application Info.plist in {asset['name']}")
+            info = plistlib.loads(archive.read(manifests[0]))
+    if (info.get("CFBundleIdentifier") != BUNDLE_ID
+            or info.get("CFBundleDisplayName", info.get("CFBundleName")) != "CManga"):
+        raise ValueError(f"Refusing wrong app identity inside {asset['name']}; expected CManga ({BUNDLE_ID}).")
+    if info.get("CFBundleShortVersionString") != version or str(info.get("CFBundleVersion")) != build:
+        raise ValueError(f"IPA filename does not match its actual version/build: {asset['name']}")
+    minimum_os = info.get("MinimumOSVersion")
+    if not minimum_os:
+        raise ValueError(f"Missing MinimumOSVersion in {asset['name']}")
+    return {
         "version": version,
-        "date": version_date,
-        "localizedDescription": description,
-        "downloadURL": download_url,
-        "size": size
+        "buildVersion": build,
+        "downloadURL": url,
+        "size": size,
+        "minOSVersion": minimum_os,
     }
 
-    duplicate_entries = [item for item in app["versions"] if item["version"] == version]
-    if duplicate_entries:
-        app["versions"].remove(duplicate_entries[0])
 
-    app["versions"].insert(0, version_entry)
-
-    app.update({
-        "version": version,
-        "versionDate": version_date,
-        "versionDescription": description,
-        "downloadURL": download_url,
-        "size": size
-    })
-
-    if "news" not in data:
-        data["news"] = []
-
-    news_identifier = f"release-{full_version}"
-    date_string = date_obj.strftime("%d/%m/%y")
-    news_entry = {
-        "appID": "com.github.kiastr.venera-ssr",
-        "caption": f"Update of Venera just got released!",
-        "date": latest_release["published_at"],
-        "identifier": news_identifier,
-        "notify": True,
-        "tintColor": "#0784FC",
-        "title": f"{full_version} - Venera  {date_string}",
-        "url": f"https://github.com/venera-app/venera/releases/tag/{tag}"
+def generate_source(repository, repository_info, releases):
+    website = repository_info["html_url"]
+    icon_url = (f"https://raw.githubusercontent.com/{repository}/"
+                f"{quote(repository_info['default_branch'], safe='')}/assets/app_icon.png")
+    source = {
+        "name": "CManga",
+        "identifier": f"{BUNDLE_ID}.source",
+        "website": website,
+        "subtitle": "Comics, with local AI.",
+        "description": "CManga is an independent comic reader with local AI enhancement, colorization and translation. IPAs require your own signing.",
+        "tintColor": "#167D8D",
+        "iconURL": icon_url,
+        "apps": [],
+        "news": [],
     }
+    versions = []
+    seen = set()
+    for release in releases:
+        for asset in release.get("assets", []):
+            name = asset["name"]
+            if not name.lower().endswith(".ipa"):
+                continue
+            if not IPA_NAME.fullmatch(name):
+                if name.lower().startswith("cmanga"):
+                    raise ValueError(f"Invalid CManga IPA name: {name}; expected cmanga-ios-VERSION+BUILD.ipa")
+                print(f"Excluding non-CManga IPA: {name}", file=sys.stderr)
+                continue
+            entry = verified_ipa(repository, asset)
+            identity = (entry["version"], entry["buildVersion"])
+            if identity in seen:
+                raise ValueError(f"Duplicate CManga iOS version/build in releases: {identity}")
+            seen.add(identity)
+            entry["date"] = release["published_at"]
+            entry["localizedDescription"] = release.get("body") or "CManga release."
+            versions.append(entry)
+    if versions:
+        versions.sort(key=lambda entry: (tuple(map(int, entry["version"].split("."))), int(entry["buildVersion"])), reverse=True)
+        latest = versions[0]
+        source["apps"].append({
+            "name": "CManga",
+            "bundleIdentifier": BUNDLE_ID,
+            "developerName": repository_info["owner"]["login"],
+            "subtitle": "Comics, with local AI.",
+            "localizedDescription": source["description"],
+            "iconURL": icon_url,
+            "tintColor": "#167D8D",
+            "category": "books",
+            "versions": versions,
+            "version": latest["version"],
+            "versionDate": latest["date"],
+            "versionDescription": latest["localizedDescription"],
+            "downloadURL": latest["downloadURL"],
+            "size": latest["size"],
+        })
+    return source
 
-    news_entry_exists = any(item["identifier"] == news_identifier for item in data["news"])
-    if not news_entry_exists:
-        data["news"].append(news_entry)
-
-    try:
-        with open(json_file, "w") as file:
-            json.dump(data, file, indent=2)
-        print("JSON file updated successfully.")
-    except IOError as e:
-        print(f"Error writing to JSON file: {e}")
-        raise
 
 def main():
-    repo_url = "venera-app/venera"
-    is_nightly = "NIGHTLY_LINK" in os.environ
+    repository = configured_repository()
+    repository_info = github_json(f"repos/{repository}")
+    # Use GitHub's canonical casing for release URL checks and generated source URLs.
+    repository = repository_info["full_name"]
+    source = generate_source(repository, repository_info, fetch_releases(repository))
+    Path(__file__).with_name("alt_store.json").write_text(
+        json.dumps(source, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(f"Generated CManga source from {repository}: {len(source['apps'])} published app(s).")
 
-    try:
-        fetched_data_latest = fetch_latest_release(repo_url)
-        json_file = "alt_store.json"
-        update_json_file_release(json_file, fetched_data_latest)
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        raise
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as error:
+        print(f"CManga AltStore generation failed: {error}", file=sys.stderr)
+        sys.exit(1)

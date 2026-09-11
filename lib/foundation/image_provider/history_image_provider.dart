@@ -1,8 +1,8 @@
 import 'dart:async' show Future;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:venera/foundation/local.dart';
-import 'package:venera/network/images.dart';
+import 'package:cmanga/foundation/local.dart';
+import 'package:cmanga/network/images.dart';
 import '../history.dart';
 import 'base_image_provider.dart';
 import 'history_image_provider.dart' as image_provider;

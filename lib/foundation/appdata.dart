@@ -2,11 +2,11 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:venera/foundation/app.dart';
-import 'package:venera/foundation/log.dart';
-import 'package:venera/utils/data_sync.dart';
-import 'package:venera/utils/init.dart';
-import 'package:venera/utils/io.dart';
+import 'package:cmanga/foundation/app.dart';
+import 'package:cmanga/foundation/log.dart';
+import 'package:cmanga/utils/data_sync.dart';
+import 'package:cmanga/utils/init.dart';
+import 'package:cmanga/utils/io.dart';
 
 class Appdata with Init {
   Appdata._create();
@@ -182,7 +182,7 @@ class Settings with ChangeNotifier {
   final _data = <String, dynamic>{
     'comicDisplayMode': 'detailed', // detailed, brief
     'comicTileScale': 1.00, // 0.75-1.25
-    'color': 'system', // red, pink, purple, green, orange, blue
+    'color': 'teal', // teal, system, red, pink, purple, green, orange, blue
     'theme_mode': 'system', // light, dark, system
     'newFavoriteAddTo': 'end', // start, end
     'moveFavoriteAfterRead': 'none', // none, end, start

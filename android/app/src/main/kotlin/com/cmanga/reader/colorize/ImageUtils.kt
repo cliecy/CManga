@@ -1,4 +1,4 @@
-package com.github.kiastr.venera_ssr.colorize
+package com.cmanga.reader.colorize
 
 import android.graphics.Bitmap
 import org.opencv.android.Utils
@@ -79,7 +79,7 @@ object ImageUtils {
      *
      * 注意：OpenCV Mat.put 期望 HWC 交错顺序，而模型输出是 NCHW（通道分离），
      * 必须显式转置，否则空间与通道会被打乱（表现为原图线条完好但散布随机彩点）。
-     * 这是 Venera 原纯 Dart 实现之外，本项目在 AiColorize 上踩过并修复的根因。
+     * 这是 CManga 原纯 Dart 实现之外，本项目在 AiColorize 上踩过并修复的根因。
      */
     fun nchwToHwcMat(buf: FloatBuffer, c: Int, h: Int, w: Int): Mat {
         buf.rewind()

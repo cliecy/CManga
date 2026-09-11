@@ -1,5 +1,5 @@
-name: venera
-description: "A comic app."
+name: cmanga
+description: "CManga — your comic library, enhanced locally."
 publish_to: 'none'
 
 version: 2.1.6+216
@@ -118,11 +118,12 @@ flutter:
 # fonts:
 
 flutter_to_arch:
-  name: Venera
-  icon: debian/gui/venera.png
+  name: CManga
+  icon: debian/gui/cmanga.png
   categories: Utility
   keywords: Flutter;comic;images;
-  url: https://github.com/venera-app/venera
+  # Set the CManga repository URL before publishing an Arch package.
+  url: ''
   depends:
     - gtk3
     - webkit2gtk-4.1

@@ -3,7 +3,7 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:venera/foundation/history.dart';
+import 'package:cmanga/foundation/history.dart';
 
 import 'appdata.dart';
 import 'favorites.dart';
@@ -13,7 +13,7 @@ export "widget_utils.dart";
 export "context.dart";
 
 class _App {
-  final version = "1.6.2";
+  final version = "2.1.6";
 
   bool get isAndroid => Platform.isAndroid;
 

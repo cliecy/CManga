@@ -2,22 +2,22 @@ import 'dart:convert';
 import 'dart:isolate';
 
 import 'package:sqlite3/sqlite3.dart';
-import 'package:venera/foundation/app.dart';
-import 'package:venera/foundation/appdata.dart';
-import 'package:venera/foundation/comic_source/comic_source.dart';
-import 'package:venera/foundation/comic_type.dart';
-import 'package:venera/foundation/favorites.dart';
-import 'package:venera/foundation/history.dart';
-import 'package:venera/foundation/log.dart';
-import 'package:venera/network/cookie_jar.dart';
-import 'package:venera/utils/ext.dart';
+import 'package:cmanga/foundation/app.dart';
+import 'package:cmanga/foundation/appdata.dart';
+import 'package:cmanga/foundation/comic_source/comic_source.dart';
+import 'package:cmanga/foundation/comic_type.dart';
+import 'package:cmanga/foundation/favorites.dart';
+import 'package:cmanga/foundation/history.dart';
+import 'package:cmanga/foundation/log.dart';
+import 'package:cmanga/network/cookie_jar.dart';
+import 'package:cmanga/utils/ext.dart';
 import 'package:zip_flutter/zip_flutter.dart';
 
 import 'io.dart';
 
 Future<File> exportAppData([bool sync = true]) async {
   var time = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-  var cacheFilePath = FilePath.join(App.cachePath, '$time.venera');
+  var cacheFilePath = FilePath.join(App.cachePath, '$time.cmanga');
   var cacheFile = File(cacheFilePath);
   var dataPath = App.dataPath;
   if (await cacheFile.exists()) {

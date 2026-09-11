@@ -3,7 +3,7 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
 
-import 'package:venera/utils/anime4k/anime4k_upscaler.dart';
+import 'package:cmanga/utils/anime4k/anime4k_upscaler.dart';
 
 /// Tests for the Anime4K super-resolution component.
 ///

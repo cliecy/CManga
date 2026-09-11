@@ -1,9 +1,5 @@
-name: Publish Build Artifacts to Release
+name: Publish CManga Release
 
-# 自动发布：当任意平台的 Action 构建成功完成后触发，
-# 根据触发的工作流名称下载对应产物，追加到同一个 release（2.1.3）。
-# 首次运行创建 release（继承上一版本的介绍），后续仅上传产物，不修改介绍。
-# 事件驱动（workflow_run），不轮询 GitHub API。
 on:
   workflow_run:
     workflows:
@@ -12,118 +8,84 @@ on:
       - "Build Linux"
       - "Build macOS"
       - "Build iOS"
-    branches: [master]
     types: [completed]
 
 permissions:
   contents: write
   actions: read
 
+concurrency:
+  group: cmanga-release-publication
+  cancel-in-progress: false
+
 env:
-  NEW_TAG: "2.1.3"
-  PREV_TAG: "2.1.2"
+  GH_REPO: ${{ github.repository }}
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
   publish:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event != 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.head_branch == github.event.repository.default_branch
     runs-on: ubuntu-latest
     steps:
-      - name: Determine artifact name from triggering workflow
-        id: artifact
-        run: |
-          WORKFLOW="${{ github.event.workflow_run.name }}"
-          echo "Triggered by workflow: $WORKFLOW"
-          case "$WORKFLOW" in
-            "Build Android APK")
-              echo "artifact_name=app-release-apk" >> "$GITHUB_OUTPUT"
-              echo "download_path=artifacts/android" >> "$GITHUB_OUTPUT"
-              echo "file_pattern=*.apk" >> "$GITHUB_OUTPUT"
-              ;;
-            "Build Windows")
-              echo "artifact_name=Venera-Windows-*" >> "$GITHUB_OUTPUT"
-              echo "download_path=artifacts/windows" >> "$GITHUB_OUTPUT"
-              echo "file_pattern=*.zip" >> "$GITHUB_OUTPUT"
-              ;;
-            "Build Linux")
-              echo "artifact_name=app-release-linux" >> "$GITHUB_OUTPUT"
-              echo "download_path=artifacts/linux" >> "$GITHUB_OUTPUT"
-              echo "file_pattern=*" >> "$GITHUB_OUTPUT"
-              ;;
-            "Build macOS")
-              echo "artifact_name=app-release-macos" >> "$GITHUB_OUTPUT"
-              echo "download_path=artifacts/macos" >> "$GITHUB_OUTPUT"
-              echo "file_pattern=*" >> "$GITHUB_OUTPUT"
-              ;;
-            "Build iOS")
-              echo "artifact_name=app-release-ios-ipa" >> "$GITHUB_OUTPUT"
-              echo "download_path=artifacts/ios" >> "$GITHUB_OUTPUT"
-              echo "file_pattern=*.ipa" >> "$GITHUB_OUTPUT"
-              ;;
-          esac
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
 
-      - name: Download build artifact from the triggering run
+      - name: Read CManga release version
+        run: |
+          VERSION=$(sed -n 's/^version: //p' pubspec.yaml | cut -d+ -f1)
+          test -n "$VERSION"
+          echo "RELEASE_TAG=cmanga-v$VERSION" >> "$GITHUB_ENV"
+
+      - name: Select CManga platform artifact
+        id: artifact
+        env:
+          WORKFLOW: ${{ github.event.workflow_run.name }}
+        run: |
+          case "$WORKFLOW" in
+            "Build Android APK") PLATFORM=android ;;
+            "Build Windows") PLATFORM=windows ;;
+            "Build Linux") PLATFORM=linux ;;
+            "Build macOS") PLATFORM=macos ;;
+            "Build iOS") PLATFORM=ios ;;
+            *) echo "::error::Unknown build workflow"; exit 1 ;;
+          esac
+          echo "name=cmanga-release-$PLATFORM" >> "$GITHUB_OUTPUT"
+
+      - name: Download artifact from the successful CManga build
         uses: actions/download-artifact@v4
         with:
-          pattern: ${{ steps.artifact.outputs.artifact_name }}
+          name: ${{ steps.artifact.outputs.name }}
           run-id: ${{ github.event.workflow_run.id }}
-          path: ${{ steps.artifact.outputs.download_path }}
-          merge-multiple: true
+          path: artifacts
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Locate downloaded files
-        id: locate
+      - name: Publish current repository assets
+        env:
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
-          DOWNLOAD_PATH="${{ steps.artifact.outputs.download_path }}"
-          echo "Downloaded contents:"
-          find "$DOWNLOAD_PATH" -type f
-          mapfile -t FILES < <(find "$DOWNLOAD_PATH" -type f)
+          mapfile -t FILES < <(find artifacts -type f)
           if [ "${#FILES[@]}" -eq 0 ]; then
-            echo "::error::No files found in artifact"
+            echo "::error::No CManga release assets found"
             exit 1
           fi
-          echo "Found ${#FILES[@]} file(s):"
-          printf '  %s\n' "${FILES[@]}"
-
-      - name: Build release notes (only on first creation)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if ! gh release view "$NEW_TAG" --repo Kiastr/Venera-SSR >/dev/null 2>&1; then
-            echo "Release $NEW_TAG does not exist yet; preparing release notes."
-            PREV_BODY=$(gh release view "$PREV_TAG" --repo Kiastr/Venera-SSR --json body -q .body)
-            if echo "$PREV_BODY" | grep -q "$NEW_TAG"; then
-              printf '%s\n' "$PREV_BODY" > /tmp/new_body.md
-            else
-              {
-                printf '%s\n' "$PREV_BODY"
-                echo ""
-                echo "---"
-                echo ""
-                echo "### Version $NEW_TAG"
-              } > /tmp/new_body.md
-            fi
-            echo "--- new release notes preview ---"
-            cat /tmp/new_body.md
+          for FILE in "${FILES[@]}"; do
+            case "$(basename "$FILE")" in
+              cmanga-*.apk|cmanga-*.ipa|cmanga-*.zip) ;;
+              *) echo "::error::Refusing non-CManga release asset: $FILE"; exit 1 ;;
+            esac
+          done
+          if gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${FILES[@]}" --clobber --repo "$GH_REPO"
           else
-            echo "Release $NEW_TAG already exists; skipping release notes creation."
+            gh release create "$RELEASE_TAG" "${FILES[@]}" \
+              --repo "$GH_REPO" \
+              --title "CManga ${RELEASE_TAG#cmanga-v}" \
+              --notes "CManga builds from $SOURCE_SHA. The iOS IPA is unsigned and requires your own signing. Native AI is supported on Windows, Android, macOS and iOS; Linux is a reader-only build." \
+              --target "$SOURCE_SHA"
           fi
-
-      - name: Upload assets to release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          DOWNLOAD_PATH="${{ steps.artifact.outputs.download_path }}"
-          mapfile -t FILES < <(find "$DOWNLOAD_PATH" -type f)
-          echo "Uploading ${#FILES[@]} asset(s) to $NEW_TAG..."
-          printf '  %s\n' "${FILES[@]}"
-          if gh release view "$NEW_TAG" --repo Kiastr/Venera-SSR >/dev/null 2>&1; then
-            gh release upload "$NEW_TAG" "${FILES[@]}" --clobber --repo Kiastr/Venera-SSR
-          else
-            gh release create "$NEW_TAG" "${FILES[@]}" \
-              --repo Kiastr/Venera-SSR \
-              --title "$NEW_TAG" \
-              --notes-file /tmp/new_body.md \
-              --target "${{ github.event.workflow_run.head_sha }}"
-          fi
-          echo "Done. Release $NEW_TAG current assets:"
-          gh release view "$NEW_TAG" --repo Kiastr/Venera-SSR --json assets -q '.assets[].name'

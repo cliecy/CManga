@@ -2,7 +2,7 @@
 # Its build recipe compiles OpenCV source for iOS arm64, arm64/x86_64 simulator,
 # and arm64/x86_64 macOS. Unlike the obsolete OpenCV CocoaPod, it is an XCFramework.
 Pod::Spec.new do |s|
-  s.name = 'VeneraOpenCV'
+  s.name = 'CMangaOpenCV'
   s.version = '4.11.0'
   s.summary = 'Pinned OpenCV Apple XCFramework from the opencv-spm distribution.'
   s.homepage = 'https://github.com/yeatse/opencv-spm'

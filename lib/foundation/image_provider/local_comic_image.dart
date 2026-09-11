@@ -1,9 +1,9 @@
 import 'dart:async' show Future;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:venera/foundation/local.dart';
-import 'package:venera/utils/io.dart';
-import 'package:venera/utils/processed_image_store.dart';
+import 'package:cmanga/foundation/local.dart';
+import 'package:cmanga/utils/io.dart';
+import 'package:cmanga/utils/processed_image_store.dart';
 import 'base_image_provider.dart';
 import 'local_comic_image.dart' as image_provider;
 

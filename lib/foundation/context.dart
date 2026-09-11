@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:venera/components/components.dart';
+import 'package:cmanga/components/components.dart';
 
 import 'app_page_route.dart';
 

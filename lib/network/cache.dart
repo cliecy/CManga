@@ -1,5 +1,5 @@
 import 'dart:typed_data';
-import 'package:venera/network/app_dio.dart';
+import 'package:cmanga/network/app_dio.dart';
 
 class NetworkCache {
   final Uri uri;
@@ -102,7 +102,7 @@ class NetworkCacheManager implements Interceptor {
         requestOptions: options,
         data: cache.data,
         headers: Headers.fromMap(cache.responseHeaders)
-          ..set('venera-cache', 'true'),
+          ..set('cmanga-cache', 'true'),
         statusCode: 200,
       ));
     } else if (diff < const Duration(seconds: 5)) {
@@ -110,7 +110,7 @@ class NetworkCacheManager implements Interceptor {
         requestOptions: options,
         data: cache.data,
         headers: Headers.fromMap(cache.responseHeaders)
-          ..set('venera-cache', 'true'),
+          ..set('cmanga-cache', 'true'),
         statusCode: 200,
       ));
     } else if (diff < const Duration(hours: 2)) {
@@ -125,7 +125,7 @@ class NetworkCacheManager implements Interceptor {
           requestOptions: options,
           data: cache.data,
           headers: Headers.fromMap(cache.responseHeaders)
-            ..set('venera-cache', 'true'),
+            ..set('cmanga-cache', 'true'),
           statusCode: 200,
         ));
       }

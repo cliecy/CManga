@@ -13,6 +13,11 @@ analyzer:
   exclude:
     # Downloaded native dependencies contain unrelated Dart examples.
     - build/**
+    - android/**
+    - ios/**
+    - windows/**
+    - macos/**
+    - linux/**
 
 linter:
   # The lint rules applied to this project can be customized in the

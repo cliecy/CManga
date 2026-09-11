@@ -2,10 +2,10 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter_qjs/flutter_qjs.dart';
-import 'package:venera/foundation/cache_manager.dart';
-import 'package:venera/foundation/comic_source/comic_source.dart';
-import 'package:venera/foundation/consts.dart';
-import 'package:venera/utils/image.dart';
+import 'package:cmanga/foundation/cache_manager.dart';
+import 'package:cmanga/foundation/comic_source/comic_source.dart';
+import 'package:cmanga/foundation/consts.dart';
+import 'package:cmanga/utils/image.dart';
 
 import 'app_dio.dart';
 

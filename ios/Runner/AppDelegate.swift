@@ -2,7 +2,7 @@ import Flutter
 import UIKit
 import UniformTypeIdentifiers
 import Foundation // 添加此行
-import VeneraImageAI
+import CMangaImageAI
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate, UIDocumentPickerDelegate {
@@ -15,15 +15,15 @@ import VeneraImageAI
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
-    guard let imageAIRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "VeneraImageAIPlugin"),
-          let platformRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "VeneraPlatformMethods") else {
+    guard let imageAIRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "CMangaImageAIPlugin"),
+          let platformRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "CMangaPlatformMethods") else {
       fatalError("Unable to register the native image AI plugin")
     }
-    VeneraImageAIPlugin.register(with: imageAIRegistrar)
+    CMangaImageAIPlugin.register(with: imageAIRegistrar)
     self.platformRegistrar = platformRegistrar
 
 
-    let methodChannel = FlutterMethodChannel(name: "venera/method_channel", binaryMessenger: engineBridge.applicationRegistrar.messenger())
+    let methodChannel = FlutterMethodChannel(name: "cmanga/method_channel", binaryMessenger: engineBridge.applicationRegistrar.messenger())
     methodChannel.setMethodCallHandler { (call, result) in
       if call.method == "getProxy" {
         if let proxySettings = CFNetworkCopySystemProxySettings()?.takeUnretainedValue() as NSDictionary?,

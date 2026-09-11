@@ -173,15 +173,12 @@ class NaviPaneState extends State<NaviPane>
   Widget build(BuildContext context) {
     onRebuild(context);
     final mq = MediaQuery.of(context);
-    final sideInsets =
-        (App.isMobile && mq.orientation == Orientation.landscape)
-            ? EdgeInsets.only(
-                left: math.max(
-                    mq.viewPadding.left, mq.systemGestureInsets.left),
-                right: math.max(
-                    mq.viewPadding.right, mq.systemGestureInsets.right),
-              )
-            : EdgeInsets.zero;
+    final sideInsets = (App.isMobile && mq.orientation == Orientation.landscape)
+        ? EdgeInsets.only(
+            left: math.max(mq.viewPadding.left, mq.systemGestureInsets.left),
+            right: math.max(mq.viewPadding.right, mq.systemGestureInsets.right),
+          )
+        : EdgeInsets.zero;
     return _NaviPopScope(
       action: () {
         if (App.mainNavigatorKey!.currentState!.canPop()) {
@@ -213,10 +210,7 @@ class NaviPaneState extends State<NaviPane>
             ],
           );
           if (sideInsets != EdgeInsets.zero) {
-            content = Padding(
-              padding: sideInsets,
-              child: content,
-            );
+            content = Padding(padding: sideInsets, child: content);
           }
           return content;
         },
@@ -257,11 +251,19 @@ class NaviPaneState extends State<NaviPane>
         width: double.infinity,
         child: Row(
           children: [
-            Text(
-              widget.paneItems[currentPage].label,
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            Expanded(
+              child: Text(
+                currentPage == 0
+                    ? 'CManga'
+                    : widget.paneItems[currentPage].label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
             ),
-            const Spacer(),
             for (var action in widget.paneActions)
               Tooltip(
                 message: action.label,
@@ -330,6 +332,45 @@ class NaviPaneState extends State<NaviPane>
           children: [
             const SizedBox(height: 16),
             SizedBox(height: MediaQuery.of(context).padding.top),
+            Padding(
+              padding: const EdgeInsets.only(bottom: 20),
+              child: Tooltip(
+                message: 'CManga',
+                child: value == 3
+                    ? Row(
+                        children: [
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(10),
+                            child: Image.asset(
+                              'assets/app_icon.png',
+                              width: 36,
+                              height: 36,
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          const Expanded(
+                            child: Text(
+                              'CManga',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 20,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        ],
+                      )
+                    : ClipRRect(
+                        borderRadius: BorderRadius.circular(10),
+                        child: Image.asset(
+                          'assets/app_icon.png',
+                          width: 32,
+                          height: 32,
+                        ),
+                      ),
+              ),
+            ),
             ...List<Widget>.generate(
               widget.paneItems.length,
               (index) => _SideNaviWidget(

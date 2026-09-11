@@ -1,16 +1,16 @@
 import 'package:flutter/foundation.dart';
-import 'package:venera/components/components.dart';
-import 'package:venera/foundation/app.dart';
-import 'package:venera/foundation/appdata.dart';
-import 'package:venera/foundation/comic_source/comic_source.dart';
-import 'package:venera/foundation/favorites.dart';
-import 'package:venera/foundation/log.dart';
-import 'package:venera/foundation/res.dart';
-import 'package:venera/network/app_dio.dart';
-import 'package:venera/utils/data.dart';
-import 'package:venera/utils/ext.dart';
+import 'package:cmanga/components/components.dart';
+import 'package:cmanga/foundation/app.dart';
+import 'package:cmanga/foundation/appdata.dart';
+import 'package:cmanga/foundation/comic_source/comic_source.dart';
+import 'package:cmanga/foundation/favorites.dart';
+import 'package:cmanga/foundation/log.dart';
+import 'package:cmanga/foundation/res.dart';
+import 'package:cmanga/network/app_dio.dart';
+import 'package:cmanga/utils/data.dart';
+import 'package:cmanga/utils/ext.dart';
 import 'package:webdav_client/webdav_client.dart' hide File;
-import 'package:venera/utils/translations.dart';
+import 'package:cmanga/utils/translations.dart';
 
 import 'io.dart';
 
@@ -131,9 +131,9 @@ class DataSync with ChangeNotifier {
         var filename = time;
         filename += '-';
         filename += appdata.settings['dataVersion'].toString();
-        filename += '.venera';
+        filename += '.cmanga';
         var files = await client.readDir('/');
-        files = files.where((e) => e.name!.endsWith('.venera')).toList();
+        files = files.where((e) => e.name!.endsWith('.cmanga')).toList();
         var old = files.firstWhereOrNull((e) => e.name!.startsWith("$time-"));
         if (old != null) {
           await client.remove(old.name!);
@@ -190,7 +190,7 @@ class DataSync with ChangeNotifier {
       try {
         var files = await client.readDir('/');
         files.sort((a, b) => b.name!.compareTo(a.name!));
-        var file = files.firstWhereOrNull((e) => e.name!.endsWith('.venera'));
+        var file = files.firstWhereOrNull((e) => e.name!.endsWith('.cmanga'));
         if (file == null) {
           throw 'No data file found';
         }

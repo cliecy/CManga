@@ -9,7 +9,7 @@ jobs:
   build:
     runs-on: windows-2022
     env:
-      VENERA_AI_DOWNLOAD_CACHE: ${{ github.workspace }}/build/ai-downloads
+      CMANGA_AI_DOWNLOAD_CACHE: ${{ github.workspace }}/build/ai-downloads
     steps:
       - uses: actions/checkout@v4
 
@@ -30,7 +30,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Windows x64
-        run: flutter build windows --release
+        run: flutter build windows --release --dart-define=CMANGA_REPOSITORY=${{ github.repository }}
 
       - name: Check bundled DLLs and architecture
         run: python windows/build.py --arch x64 --verify-only
@@ -39,7 +39,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          cmake --build build/windows/x64 --config Release --target venera_image_ai_smoke --parallel 2
+          cmake --build build/windows/x64 --config Release --target cmanga_image_ai_smoke --parallel 2
           if ($LASTEXITCODE -ne 0) { throw 'Native smoke build failed' }
 
       - name: Exercise ACNet CPU and missing DirectML
@@ -57,7 +57,7 @@ jobs:
           New-Item -ItemType Directory -Force build/ai-smoke-results | Out-Null
           $image.Save("$pwd/build/ai-smoke-results/input.png", [System.Drawing.Imaging.ImageFormat]::Png)
           $image.Dispose()
-          $smoke = Resolve-Path build/windows/x64/Release/venera_image_ai_smoke.exe
+          $smoke = Resolve-Path build/windows/x64/Release/cmanga_image_ai_smoke.exe
           $arguments = @('--model', 'assets/models/anime4k_acnet.onnx', '--image', 'build/ai-smoke-results/input.png', '--type', 'esrgan', '--scale', '1.3', '--strength', '1', '--intensity', '1')
           & $smoke @arguments --backend cpu --output build/ai-smoke-results/cpu.png --renders 3 --check-strength true | Tee-Object build/ai-smoke-results/cpu.jsonl
           if ($LASTEXITCODE -ne 0) { throw 'ACNet CPU inference failed' }
@@ -85,7 +85,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Windows-CPU-AI-smoke
+          name: cmanga-windows-cpu-ai-smoke
           path: build/ai-smoke-results/
           if-no-files-found: warn
 
@@ -94,12 +94,12 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $VERSION = (Get-Content pubspec.yaml | Select-String '^version: ').ToString().Split(' ')[1].Split('+')[0]
-          $ARCHIVE_NAME = "Venera-Windows-v$VERSION.zip"
+          $ARCHIVE_NAME = "cmanga-windows-$VERSION.zip"
           Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath $ARCHIVE_NAME
           "ARCHIVE_NAME=$ARCHIVE_NAME" >> $env:GITHUB_ENV
 
       - name: Upload Windows Build
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ARCHIVE_NAME }}
+          name: cmanga-release-windows
           path: ${{ env.ARCHIVE_NAME }}

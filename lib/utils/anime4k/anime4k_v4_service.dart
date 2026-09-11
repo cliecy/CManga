@@ -1,7 +1,7 @@
 import 'dart:typed_data';
 
-import 'package:venera/foundation/appdata.dart';
-import 'package:venera/utils/image_ai_service.dart';
+import 'package:cmanga/foundation/appdata.dart';
+import 'package:cmanga/utils/image_ai_service.dart';
 
 import 'anime4k_v4_model_manager.dart';
 

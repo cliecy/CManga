@@ -5,14 +5,14 @@ import 'package:flutter/widgets.dart' show ChangeNotifier;
 import 'package:flutter_saf/flutter_saf.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:sqlite3/sqlite3.dart';
-import 'package:venera/foundation/comic_source/comic_source.dart';
-import 'package:venera/foundation/comic_type.dart';
-import 'package:venera/foundation/favorites.dart';
-import 'package:venera/foundation/log.dart';
-import 'package:venera/network/download.dart';
-import 'package:venera/pages/reader/reader.dart';
-import 'package:venera/utils/io.dart';
-import 'package:venera/utils/processed_image_store.dart';
+import 'package:cmanga/foundation/comic_source/comic_source.dart';
+import 'package:cmanga/foundation/comic_type.dart';
+import 'package:cmanga/foundation/favorites.dart';
+import 'package:cmanga/foundation/log.dart';
+import 'package:cmanga/network/download.dart';
+import 'package:cmanga/pages/reader/reader.dart';
+import 'package:cmanga/utils/io.dart';
+import 'package:cmanga/utils/processed_image_store.dart';
 
 import 'app.dart';
 import 'history.dart';
@@ -238,7 +238,7 @@ class LocalManager with ChangeNotifier {
   }
 
   Future<void> _checkPathValidation() async {
-    var testFile = File(FilePath.join(path, 'venera_test'));
+    var testFile = File(FilePath.join(path, 'cmanga_test'));
     try {
       testFile.createSync();
       testFile.deleteSync();

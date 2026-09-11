@@ -1,5 +1,5 @@
-#ifndef VENERA_APPLE_METAL_PROVIDER_H_
-#define VENERA_APPLE_METAL_PROVIDER_H_
+#ifndef CMANGA_APPLE_METAL_PROVIDER_H_
+#define CMANGA_APPLE_METAL_PROVIDER_H_
 
 #include <string>
 #include <onnxruntime_c_api.h>

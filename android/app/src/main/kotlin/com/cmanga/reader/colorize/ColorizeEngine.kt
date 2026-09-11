@@ -1,4 +1,4 @@
-package com.github.kiastr.venera_ssr.colorize
+package com.cmanga.reader.colorize
 
 import ai.onnxruntime.OnnxJavaType
 import ai.onnxruntime.OnnxTensor

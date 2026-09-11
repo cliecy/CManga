@@ -6,7 +6,7 @@ import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as path;
 
 class ProcessedImageStore {
-  static const directoryName = '.venera-processed';
+  static const directoryName = '.cmanga-processed';
   static final _random = Random.secure();
 
   /// Derived images must never become source pages or imported chapters.

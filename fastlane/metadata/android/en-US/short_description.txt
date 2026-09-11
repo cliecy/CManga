@@ -1,1 +1,1 @@
-A comic reader that support reading local and network comics.
+Your comic library, with local AI enhancement and translation.

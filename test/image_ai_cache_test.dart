@@ -5,7 +5,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
-import 'package:venera/utils/image_ai_cache.dart';
+import 'package:cmanga/utils/image_ai_cache.dart';
 
 void main() {
   final binding = TestWidgetsFlutterBinding.ensureInitialized();
@@ -34,7 +34,7 @@ void main() {
       ).setLastModified(DateTime.utc(2000, 1, 1, 0, 0, order));
 
   setUpAll(() async {
-    root = await Directory.systemTemp.createTemp('venera-cache-regression-');
+    root = await Directory.systemTemp.createTemp('cmanga-cache-regression-');
     binding.defaultBinaryMessenger.setMockMethodCallHandler(
       const MethodChannel('plugins.flutter.io/path_provider'),
       (call) async => '${root.path}/${call.method}',

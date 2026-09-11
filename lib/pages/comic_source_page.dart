@@ -3,17 +3,17 @@ import 'dart:io' as io;
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:url_launcher/url_launcher_string.dart';
-import 'package:venera/components/components.dart';
-import 'package:venera/foundation/app.dart';
-import 'package:venera/foundation/appdata.dart';
-import 'package:venera/foundation/comic_source/comic_source.dart';
-import 'package:venera/foundation/log.dart';
-import 'package:venera/network/app_dio.dart';
-import 'package:venera/network/cookie_jar.dart';
-import 'package:venera/pages/webview.dart';
-import 'package:venera/utils/ext.dart';
-import 'package:venera/utils/io.dart';
-import 'package:venera/utils/translations.dart';
+import 'package:cmanga/components/components.dart';
+import 'package:cmanga/foundation/app.dart';
+import 'package:cmanga/foundation/appdata.dart';
+import 'package:cmanga/foundation/comic_source/comic_source.dart';
+import 'package:cmanga/foundation/log.dart';
+import 'package:cmanga/network/app_dio.dart';
+import 'package:cmanga/network/cookie_jar.dart';
+import 'package:cmanga/pages/webview.dart';
+import 'package:cmanga/utils/ext.dart';
+import 'package:cmanga/utils/io.dart';
+import 'package:cmanga/utils/translations.dart';
 
 class ComicSourcePage extends StatelessWidget {
   const ComicSourcePage({super.key});

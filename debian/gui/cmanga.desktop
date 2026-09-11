@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=CManga
+GenericName=Comic Reader
+Comment=Read and organize local and network comics
+Terminal=false
+Type=Application
+Categories=Graphics;Viewer;
+Keywords=comic;manga;reader;images;
+Exec=cmanga %U
+Icon=cmanga

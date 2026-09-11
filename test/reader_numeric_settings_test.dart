@@ -1,7 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:venera/foundation/appdata.dart';
+import 'package:cmanga/foundation/appdata.dart';
 
 void main() {
   final settings = appdata.settings;

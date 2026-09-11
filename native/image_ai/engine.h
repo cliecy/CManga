@@ -1,5 +1,5 @@
-#ifndef VENERA_IMAGE_AI_ENGINE_H_
-#define VENERA_IMAGE_AI_ENGINE_H_
+#ifndef CMANGA_IMAGE_AI_ENGINE_H_
+#define CMANGA_IMAGE_AI_ENGINE_H_
 
 #include <atomic>
 #include <cstdint>

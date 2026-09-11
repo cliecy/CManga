@@ -1,5 +1,5 @@
-#ifndef VENERA_IMAGE_AI_IMAGE_MEMORY_H_
-#define VENERA_IMAGE_AI_IMAGE_MEMORY_H_
+#ifndef CMANGA_IMAGE_AI_IMAGE_MEMORY_H_
+#define CMANGA_IMAGE_AI_IMAGE_MEMORY_H_
 
 #include <cstdint>
 #include <cstddef>

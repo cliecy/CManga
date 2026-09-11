@@ -2,22 +2,22 @@
 
 ## Introduction
 
-Venera is a comic reader that can read comics from various sources. 
+CManga is a comic reader that can read comics from various sources.
 
 All comic sources are written in javascript. 
-Venera uses [flutter_qjs](https://github.com/wgh136/flutter_qjs) as js engine which is forked from [ekibun](https://github.com/ekibun/flutter_qjs).
+CManga uses [flutter_qjs](https://github.com/wgh136/flutter_qjs) as its JavaScript engine, forked from [ekibun](https://github.com/ekibun/flutter_qjs).
 
-This document will describe how to write a comic source for Venera.
+This document describes how to write a comic source for CManga.
 
 ## Comic Source List
 
-Venera can display a list of comic sources in the app.
+CManga can display a list of comic sources in the app.
 
-You can use the following repo url:
+The following real upstream source repository can be configured:
 ```
 https://cdn.jsdelivr.net/gh/venera-app/venera-configs@main/index.json
 ```
-The repo is maintained by the Venera team.
+This repository is maintained by the upstream Venera team, independently of CManga.
 
 > The link is a mirror of the original repo. To contribute your comic source, please visit the [original repo](https://github.com/venera-app/venera-configs)
 
@@ -45,9 +45,9 @@ The description field is optional.
 
 ### Preparation
 
-- Install Venera. Using flutter to run the project is recommended since it's easier to debug.
+- Install CManga. Using Flutter to run the project is recommended since it is easier to debug.
 - An editor that supports javascript.
-- Download template and venera javascript api from [here](https://github.com/venera-app/venera-configs).
+- Download the compatible upstream template and JavaScript API from [the source repository](https://github.com/venera-app/venera-configs).
 
 ### Start Writing
 

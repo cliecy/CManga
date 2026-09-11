@@ -21,7 +21,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: build/apple-ort
-          key: apple-ort-ios-${{ runner.arch }}-${{ hashFiles('native/apple/build_ort_metal.py', 'native/apple/ort-metal.patch', 'native/apple/VeneraOnnxRuntime.podspec') }}
+          key: apple-ort-ios-${{ runner.arch }}-${{ hashFiles('native/apple/build_ort_metal.py', 'native/apple/ort-metal.patch', 'native/apple/CMangaOnnxRuntime.podspec') }}
           restore-keys: apple-ort-ios-${{ runner.arch }}-
 
       - name: Build device and simulator Metal runtime slices
@@ -45,21 +45,22 @@ jobs:
         run: flutter pub get
 
       - name: Build iOS simulator native integration
-        run: flutter build ios --simulator --debug
+        run: flutter build ios --simulator --debug --dart-define=CMANGA_REPOSITORY=${{ github.repository }}
         
       - name: Build iOS (No Signing)
-        run: flutter build ios --release --no-codesign
+        run: flutter build ios --release --no-codesign --dart-define=CMANGA_REPOSITORY=${{ github.repository }}
         
       - name: Create Payload Directory
         run: |
+          VERSION=$(sed -n 's/^version: //p' pubspec.yaml)
           mkdir -p build/ios/iphoneos/Payload
           cp -r build/ios/iphoneos/Runner.app build/ios/iphoneos/Payload/
           cd build/ios/iphoneos
-          zip -r ../../Venera-iOS-NoCodesign.ipa Payload
+          zip -r "../../cmanga-ios-${VERSION}.ipa" Payload
           
       - name: Upload iOS Build
         uses: actions/upload-artifact@v4
         with:
-          name: app-release-ios-ipa
-          path: build/Venera-iOS-NoCodesign.ipa
+          name: cmanga-release-ios
+          path: build/cmanga-ios-*.ipa
           if-no-files-found: error

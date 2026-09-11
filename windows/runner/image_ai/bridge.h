@@ -1,5 +1,5 @@
-#ifndef VENERA_IMAGE_AI_BRIDGE_H_
-#define VENERA_IMAGE_AI_BRIDGE_H_
+#ifndef CMANGA_IMAGE_AI_BRIDGE_H_
+#define CMANGA_IMAGE_AI_BRIDGE_H_
 
 #include <flutter/binary_messenger.h>
 #include <windows.h>

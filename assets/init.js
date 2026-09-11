@@ -1,7 +1,7 @@
 /*
-Venera JavaScript Library
+CManga JavaScript Library
 
-This library provides a set of APIs for interacting with the Venera app.
+This library provides a set of APIs for interacting with the CManga app.
 */
 
 /**

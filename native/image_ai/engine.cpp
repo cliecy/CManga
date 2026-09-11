@@ -140,7 +140,7 @@ struct Runtime {
 #endif
         if (!api) throw Error("backend_unavailable", "ONNX Runtime API version does not match this application.");
       }
-      Check(api, api->CreateEnv(ORT_LOGGING_LEVEL_WARNING, "venera_image_ai", &env));
+      Check(api, api->CreateEnv(ORT_LOGGING_LEVEL_WARNING, "cmanga_image_ai", &env));
     } catch (...) {
       Close();
       throw;

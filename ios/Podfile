@@ -35,9 +35,9 @@ target 'Runner' do
   use_frameworks!
   use_modular_headers!
 
-  pod 'VeneraOpenCV', :podspec => '../native/VeneraOpenCV.podspec'
-  pod 'VeneraOnnxRuntime', :path => '../build/apple-ort/ios/package'
-  pod 'VeneraImageAI', :path => '../native'
+  pod 'CMangaOpenCV', :podspec => '../native/CMangaOpenCV.podspec'
+  pod 'CMangaOnnxRuntime', :path => '../build/apple-ort/ios/package'
+  pod 'CMangaImageAI', :path => '../native'
 
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
   #target 'RunnerTests' do

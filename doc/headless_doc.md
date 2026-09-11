@@ -1,13 +1,13 @@
-# Venera Headless Mode
+# CManga Headless Mode
 
-Venera's headless mode allows you to run key features from the command line, making it easy to automate tasks and integrate with other tools. This document outlines the available commands and their usage.
+CManga's headless mode allows you to run key features from the command line, making it easy to automate tasks and integrate with other tools. This document outlines the available commands and their usage.
 
 ## How to Use
 
-To activate headless mode, use the `--headless` flag when running the Venera executable, followed by the desired command.
+To activate headless mode, use the `--headless` flag when running the CManga executable, followed by the desired command.
 
 ```bash
-venera --headless <command> [subcommand] [options]
+cmanga --headless <command> [subcommand] [options]
 ```
 
 ## Global Options
@@ -26,7 +26,7 @@ Manage WebDAV data synchronization.
 **Example:**
 
 ```bash
-venera --headless webdav up
+cmanga --headless webdav up
 ```
 
 ### `updatescript`
@@ -38,7 +38,7 @@ Update comic source scripts.
 **Example:**
 
 ```bash
-venera --headless updatescript all
+cmanga --headless updatescript all
 ```
 
 **Output Format:**
@@ -96,10 +96,10 @@ Update your subscribed comics and retrieve a list of updated comics.
 
 ```bash
 # Update all subscriptions
-venera --headless updatesubscribe
+cmanga --headless updatesubscribe
 
 # Update a single comic
-venera --headless updatesubscribe --update-comic-by-id-type "comic-id" "source-key"
+cmanga --headless updatesubscribe --update-comic-by-id-type "comic-id" "source-key"
 ```
 
 ## Output Format

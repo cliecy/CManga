@@ -1,10 +1,10 @@
 import 'dart:isolate';
 
 import 'package:uuid/uuid.dart';
-import 'package:venera/foundation/local.dart';
-import 'package:venera/utils/file_type.dart';
-import 'package:venera/utils/io.dart';
-import 'package:venera/utils/local_comic_export.dart';
+import 'package:cmanga/foundation/local.dart';
+import 'package:cmanga/utils/file_type.dart';
+import 'package:cmanga/utils/io.dart';
+import 'package:cmanga/utils/local_comic_export.dart';
 import 'package:zip_flutter/zip_flutter.dart';
 
 class EpubData {

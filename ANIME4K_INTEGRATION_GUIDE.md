@@ -1,10 +1,10 @@
-# Anime4K 超分辨率模块集成指南
+# CManga Anime4K 超分辨率模块集成指南
 
-本文档说明如何在 Venera 项目中使用集成的 Anime4K 超分辨率模块。
+本文档保留 CManga 所继承的 Anime4K v1 模块原始集成记录。下文历史接口示例不代表当前原生 AI 管线；当前使用方法、模型约束和构建命令请参见 [README](README.md)。
 
 ## 概述
 
-Anime4K 是一个高效的动漫/漫画图像超分辨率处理算法，已成功从 JhentaiSR 项目移植到 Venera。该模块提供以下功能：
+Anime4K 是一个高效的动漫/漫画图像超分辨率处理算法；CManga 保留了最初从 JhentaiSR 移植的 v1 模块。原始模块提供以下功能：
 
 - **智能超分处理**：基于 Anime4K v1.0 的 "Push Pixels" 算法
 - **缓存机制**：避免重复处理相同图像
@@ -32,7 +32,7 @@ lib/
 
 **问题**：JhentaiSR 使用 `log.debug()` 和 `log.error()` 方式调用日志
 
-**解决方案**：Venera 使用 `Log.info()` 和 `Log.error()` 方式，已在以下文件中修复：
+**解决方案**：CManga 使用 `Log.info()` 和 `Log.error()` 方式，原始集成在以下文件中适配：
 
 - `lib/utils/anime4k/anime4k_service.dart`：所有日志调用已改为 `Log.info()` 和 `Log.error()`
 
@@ -42,7 +42,7 @@ lib/
 
 **解决方案**：
 
-- Venera 的 `comic_image.dart` 中已正确定义了所有必需的变量：
+- 原始集成在 CManga 的 `comic_image.dart` 中定义了所需变量：
   - `_upscaledBytes`：存储超分后的图像字节数据
   - `_isUpscaling`：标记是否正在处理中
   - 所有 widget 参数通过 `widget.` 前缀访问
@@ -101,7 +101,7 @@ flutter build apk --release
 在应用启动时初始化 Anime4K 服务（在 `lib/init.dart` 中添加）：
 
 ```dart
-import 'package:venera/utils/anime4k/anime4k_service.dart';
+import 'package:cmanga/utils/anime4k/anime4k_service.dart';
 
 Future<void> init() async {
   // ... 其他初始化代码 ...
@@ -237,7 +237,7 @@ dependencies:
 
 ```dart
 import 'package:flutter_test/flutter_test.dart';
-import 'package:venera/utils/anime4k/anime4k_service.dart';
+import 'package:cmanga/utils/anime4k/anime4k_service.dart';
 
 void main() {
   test('Anime4K service initialization', () async {
@@ -257,7 +257,7 @@ void main() {
 
 - **Anime4K 官方**：https://github.com/bloc97/Anime4K
 - **JhentaiSR 项目**：https://github.com/jhenil/JhentaiSR
-- **Venera 项目**：https://github.com/venera-app/venera
+- **上游 Venera 项目（来源署名）**：https://github.com/venera-app/venera
 
 ## 许可证
 

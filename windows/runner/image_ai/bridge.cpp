@@ -143,7 +143,7 @@ struct Bridge::Impl {
   Impl(flutter::BinaryMessenger* messenger, HWND window)
       : worker(std::make_shared<Worker>(window)) {
     channel = std::make_unique<flutter::MethodChannel<Value>>(
-        messenger, "com.github.kiastr.venera_ssr/colorize", &flutter::StandardMethodCodec::GetInstance());
+        messenger, "com.cmanga.reader/colorize", &flutter::StandardMethodCodec::GetInstance());
     channel->SetMethodCallHandler([this](const flutter::MethodCall<Value>& call, std::unique_ptr<MethodResult> result) {
       Accept(call, std::move(result));
     });

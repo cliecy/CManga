@@ -5,7 +5,7 @@ import 'dart:typed_data';
 import 'package:flutter/painting.dart';
 
 import 'reader_image.dart';
-import 'package:venera/utils/image_ai_service.dart';
+import 'package:cmanga/utils/image_ai_service.dart';
 import 'reader_image_details.dart';
 
 /// One ordered, chapter-owned pipeline for visible and preloaded pages.

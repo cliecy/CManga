@@ -58,13 +58,13 @@ PODS:
     - sqlite3/rtree
   - url_launcher_ios (0.0.1):
     - Flutter
-  - VeneraImageAI (1.0.0):
+  - CMangaImageAI (1.0.0):
     - Flutter
     - FlutterMacOS
-    - VeneraOnnxRuntime (= 1.29.0)
-    - VeneraOpenCV (= 4.11.0)
-  - VeneraOnnxRuntime (1.29.0)
-  - VeneraOpenCV (4.11.0)
+    - CMangaOnnxRuntime (= 1.29.0)
+    - CMangaOpenCV (= 4.11.0)
+  - CMangaOnnxRuntime (1.29.0)
+  - CMangaOpenCV (4.11.0)
   - zip_flutter (0.0.1):
     - Flutter
 
@@ -86,9 +86,9 @@ DEPENDENCIES:
   - shared_preferences_foundation (from `.symlinks/plugins/shared_preferences_foundation/darwin`)
   - sqlite3_flutter_libs (from `.symlinks/plugins/sqlite3_flutter_libs/darwin`)
   - url_launcher_ios (from `.symlinks/plugins/url_launcher_ios/ios`)
-  - VeneraImageAI (from `../native`)
-  - VeneraOnnxRuntime (from `../build/apple-ort/ios/package`)
-  - VeneraOpenCV (from `../native/VeneraOpenCV.podspec`)
+  - CMangaImageAI (from `../native`)
+  - CMangaOnnxRuntime (from `../build/apple-ort/ios/package`)
+  - CMangaOpenCV (from `../native/CMangaOpenCV.podspec`)
   - zip_flutter (from `.symlinks/plugins/zip_flutter/ios`)
 
 SPEC REPOS:
@@ -131,12 +131,12 @@ EXTERNAL SOURCES:
     :path: ".symlinks/plugins/sqlite3_flutter_libs/darwin"
   url_launcher_ios:
     :path: ".symlinks/plugins/url_launcher_ios/ios"
-  VeneraImageAI:
+  CMangaImageAI:
     :path: "../native"
-  VeneraOnnxRuntime:
+  CMangaOnnxRuntime:
     :path: "../build/apple-ort/ios/package"
-  VeneraOpenCV:
-    :podspec: "../native/VeneraOpenCV.podspec"
+  CMangaOpenCV:
+    :podspec: "../native/CMangaOpenCV.podspec"
   zip_flutter:
     :path: ".symlinks/plugins/zip_flutter/ios"
 
@@ -160,11 +160,8 @@ SPEC CHECKSUMS:
   sqlite3: 3c950dc86011117c307eb0b28c4a7bb449dce9f1
   sqlite3_flutter_libs: 3c323550ef3b928bc0aa9513c841e45a7d242832
   url_launcher_ios: 694010445543906933d732453a59da0a173ae33d
-  VeneraImageAI: cc4f9d770095a1cb75dff344d8b00879139ac924
-  VeneraOnnxRuntime: 10f0c82ace63d952d2b54ef619f1ef35901af8ad
-  VeneraOpenCV: 955dd73325b65851dca44f5ddf3be2d0d52513a0
   zip_flutter: 452447e26d7e66c88fc582ad7ad86fcee39c7b53
 
-PODFILE CHECKSUM: 814d941de3fdf31fc87fd1a22bcd478f61a55e75
+PODFILE CHECKSUM: 79c8cd25d063a371ed772b1a42adbfec85b56dd1
 
 COCOAPODS: 1.17.0

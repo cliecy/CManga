@@ -3,7 +3,7 @@ import 'dart:collection';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
-import 'package:venera/utils/image_ai_cache.dart';
+import 'package:cmanga/utils/image_ai_cache.dart';
 
 /// Metadata only: never retains decoded images or encoded page bytes.
 class ReaderImageDetails {

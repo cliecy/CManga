@@ -1,4 +1,4 @@
-package com.github.kiastr.venera_ssr.colorize
+package com.cmanga.reader.colorize
 
 import ai.onnxruntime.OrtEnvironment
 import android.app.Activity
@@ -27,7 +27,7 @@ import java.util.concurrent.TimeUnit
 class ColorizePlugin private constructor(context: Context, private val channel: MethodChannel) :
     MethodChannel.MethodCallHandler {
     companion object {
-        const val CHANNEL = "com.github.kiastr.venera_ssr/colorize"
+        const val CHANNEL = "com.cmanga.reader/colorize"
 
         fun registerWith(context: Context, messenger: BinaryMessenger) {
             val channel = MethodChannel(messenger, CHANNEL)

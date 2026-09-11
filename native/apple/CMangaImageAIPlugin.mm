@@ -1,4 +1,4 @@
-#import "VeneraImageAIPlugin.h"
+#import "CMangaImageAIPlugin.h"
 
 #include "../image_ai/engine.h"
 #include "../image_ai/image_memory.h"
@@ -105,7 +105,7 @@ struct Job {
 };
 }  // namespace
 
-@interface VeneraImageAIPlugin () {
+@interface CMangaImageAIPlugin () {
   dispatch_queue_t _queue;
   std::shared_ptr<Worker> _worker;
   NSMutableDictionary<NSNumber*, FlutterResult>* _pending;
@@ -116,11 +116,11 @@ struct Job {
 }
 @end
 
-@implementation VeneraImageAIPlugin
+@implementation CMangaImageAIPlugin
 + (void)registerWithRegistrar:(id<FlutterPluginRegistrar>)registrar {
-  VeneraImageAIPlugin* plugin = [[VeneraImageAIPlugin alloc] init];
+  CMangaImageAIPlugin* plugin = [[CMangaImageAIPlugin alloc] init];
   FlutterMethodChannel* channel = [FlutterMethodChannel
-      methodChannelWithName:@"com.github.kiastr.venera_ssr/colorize"
+      methodChannelWithName:@"com.cmanga.reader/colorize"
       binaryMessenger:[registrar messenger]];
   [registrar addMethodCallDelegate:plugin channel:channel];
   [registrar publish:plugin];
@@ -131,7 +131,7 @@ struct Job {
   if (self) {
     _worker = std::make_shared<Worker>();
     _pending = [NSMutableDictionary dictionary];
-    _queue = dispatch_queue_create("com.github.kiastr.venera_ssr.image-ai", DISPATCH_QUEUE_SERIAL);
+    _queue = dispatch_queue_create("com.cmanga.reader.image-ai", DISPATCH_QUEUE_SERIAL);
     dispatch_set_target_queue(_queue, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0));
 #if TARGET_OS_IOS
     NSNotificationCenter* notifications = [NSNotificationCenter defaultCenter];
@@ -230,7 +230,7 @@ struct Job {
     _pending[identifier] = [result copy];
     _pendingBytes += bytes;
     auto worker = _worker;
-    __weak VeneraImageAIPlugin* weakSelf = self;
+    __weak CMangaImageAIPlugin* weakSelf = self;
     dispatch_async(_queue, ^{
       @autoreleasepool {
         id reply = nil;
@@ -274,7 +274,7 @@ struct Job {
           reply = Failure("image_ai_failed", "Unknown native image processing failure.");
         }
         dispatch_async(dispatch_get_main_queue(), ^{
-          VeneraImageAIPlugin* plugin = weakSelf;
+          CMangaImageAIPlugin* plugin = weakSelf;
           if (!plugin) return;
           FlutterResult completion = plugin->_pending[identifier];
           if (!completion) return;

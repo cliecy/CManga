@@ -1,32 +1,28 @@
-# Venera-SSR
+# CManga
 
-A revision comic reader
-support different resource source  
-use anime4k to SR.
-Black and white cartoon 
-via ocr Translate Picture Embedded Text（MML Local inference high quality translation）
-All running locally
+**Your comics. Your colors. Your device.**
 
-一个支持不同漫画源，anime4k超分辨率，本地黑白漫画上色，本地ocr翻译的改版漫画阅读器
+CManga is an independent comic reader for local libraries and configurable network sources, with on-device super-resolution, black-and-white page colorization, and embedded-text translation. Its ink-navy, teal and warm-paper identity puts the pages first.
+
+CManga 是一款独立漫画阅读器：整理本地书库、连接自选漫画源，并在设备上完成超分、黑白漫画上色与内嵌文字翻译。模型安装后可离线处理；网络漫画源、首次模型下载和 WebDAV 同步仍需网络连接。
+
+This project builds on [Venera](https://github.com/venera-app/venera) and other open-source work. CManga is not an upstream release or an automatic replacement for an existing installation. Real dependency, model and attribution links are retained; they do not identify CManga app downloads.
 
 ## Features
 
-**黑白漫画上色**
-**Black and white cartoon coloring**
-（Windows / Android / macOS / iOS 共用升级版模型管理、阅读处理与导出功能；Linux 不接入原生 AI）
+- Read local and network comics, organize favorites, and download chapters.
+- Add JavaScript comic sources; source-dependent features include comments, tags and account actions.
+- Sync with WebDAV and export/import your data.
+- Enhance pages with Anime4K and compatible local ONNX models, colorize monochrome art, and translate embedded text.
+- Use native AI on Windows, Android, macOS and iOS, subject to model and device requirements. Linux supports the reader but not the native AI pipeline.
 
-**支持webdav同步**
+### Independent app and data
 
-**漫画内嵌文字替换并翻译功能
-Cartoon embedded text translation function**
+CManga uses `com.cmanga.reader` as its platform identity and `cmanga` as its package/executable name. It has its own application storage; installing it does not overwrite or automatically import another reader's data. Keep the previous app and a backup until your library and settings have been transferred successfully. Use the reader's explicit export/import actions for backups and the [local comic import formats](doc/import_comic.md) for comic files; do not delete or move the old application's storage to force migration.
 
-- Read local comics
-- Use javascript to create comic sources
-- Read comics from network sources
-- Manage favorite comics
-- Download comics
-- View comments, tags, and other information of comics if the source supports
-- Login to comment, rate, and other operations if the source supports
+CManga data exports use `.cmanga`. Processed images are stored separately in `.cmanga-processed/` beside eligible local pages; originals are not replaced. Historical backup formats and processed-image directories are not aliases for the new identity.
+
+To transfer an older reader backup: export it in the old app first, keep that original untouched, make a copy, and rename only the copy's extension to `.cmanga` before selecting it in CManga's data import action. The old extension is not directly selectable. The ZIP payload structure is retained, but check your imported library, history, sources and settings before removing the old app; model files and downloaded comics may need to be imported separately.
 
 ### Windows / Android / macOS / iOS 本地 AI 图像处理
 
@@ -50,7 +46,7 @@ Cartoon embedded text translation function**
 | 选择 | 文件体积 / 输入输出约定 | 来源与限制 |
 | --- | --- | --- |
 | DeOldify Artistic / int8 | 标准版约 243 MiB；int8 为实验性轻量变体，仍需兼容 RGB 包装 | 保留现有 DeOldify 管线；[标准 ONNX](https://github.com/instant-high/deoldify-onnx)、[int8 发布](https://github.com/Kiastr/AiColorize/releases/tag/models)。再分发前核对发布者及上游许可。 |
-| AnimeColorDeOldify (`anime_deoldify`) | 约 423 MB；固定 256×256、float32 RGB 0–255 | 来自 [Dakini Grayscale2Color](https://github.com/Dakini/AnimeColorDeOldify) 的原始权重转换，[项目 ONNX 发布及转换来源说明](https://github.com/cliecy/Venera-SSR/releases/tag/image-ai-models-20260909)。Dakini 声明其训练权重为 MIT；应用保留原图 Lab 亮度、透明度与尺寸，不是上游 YUV 滤镜的逐像素复刻。 |
+| AnimeColorDeOldify (`anime_deoldify`) | 约 423 MB；固定 256×256、float32 RGB 0–255 | 来自 [Dakini Grayscale2Color](https://github.com/Dakini/AnimeColorDeOldify) 的原始权重转换，[上游 ONNX 发布及转换来源说明](https://github.com/cliecy/CManga/releases/tag/image-ai-models-20260909)。Dakini 声明其训练权重为 MIT；应用保留原图 Lab 亮度、透明度与尺寸，不是上游 YUV 滤镜的逐像素复刻。 |
 | DDColor Artistic (`ddcolor`) | 约 980 MB；256×256 中性 Lab 转 RGB 输入，输出两通道 Lab ab | [FaceFusion ONNX](https://huggingface.co/facefusion/models-3.0.0)；[DDColor 上游](https://github.com/piddnad/DDColor) 为 Apache-2.0，FaceFusion 聚合仓库未单独声明该导出许可。支持这一明确契约，不代表任意 DDColor 导出均兼容。 |
 | Manga Light Colorizer V6 (`manga_light`) | 约 191 MB；512×512 灰度，`v6_generator.onnx`，generator-only | [sharky172 固定版本](https://huggingface.co/sharky172/manga-light-colorizer/tree/2fb022c4ce55632b7671a1df306f63984928e36a)，CC BY-NC-SA 4.0：署名、仅非商业、衍生作品同许可；下载前须确认，导入也须遵守许可。原有 Manga Light 选项已经使用此 V6 权重，本次明确版本名称，不重复下载同一模型。SAM 特征和 WD14 嵌入填零，**不运行分割或标签语义引导**，不等同完整上游管线。 |
 | Manga Colorization v2 (`manga_v2`) | 约 61 MB；五通道输入，提示/掩码置零，长边适配 512 并补齐至 32 的倍数 | **仅本地导入，无内置下载**。[Faridzar ONNX](https://huggingface.co/Faridzar/manga-colorization-v2-onnx) 标注 MIT，但 [qweasdd 上游权重](https://github.com/qweasdd/manga-colorization-v2) 许可未核实，商业使用及再分发未获澄清。 |
@@ -64,10 +60,14 @@ Cartoon embedded text translation function**
 #### 保存、导出与逐页信息
 
 - 阅读器的**保存、分享、复制图片默认使用当前有效设置下的处理结果**，不是下载缓存中的原图；按“自定义处理（若开启）→ 超分 → 上色”执行。任何已启用 AI 阶段失败时，阅读可保留可用图片，但显式导出会报错，不把原图或部分结果冒充完整处理结果。
-- 对本地/已下载的 `file://` 源页，成功的处理阶段自动在源页同级的隐藏分类目录 `.venera-processed/` 中保存 PNG：`super_resolution`（超分）、`colorization`（仅成功上色）、`super_resolution_colorization`（超分后上色）。下层按原文件名和结果内容哈希组织，同一结果复用、不同结果并存；**不覆盖原图或旧结果**。两阶段均成功时保留超分中间图与最终组合图。写入失败在逐页信息中记录，不妨碍阅读，也不声称保存成功；在线页不会自动写到漫画目录。
+- 对本地/已下载的 `file://` 源页，成功的处理阶段自动在源页同级的隐藏分类目录 `.cmanga-processed/` 中保存 PNG：`super_resolution`（超分）、`colorization`（仅成功上色）、`super_resolution_colorization`（超分后上色）。下层按原文件名和结果内容哈希组织，同一结果复用、不同结果并存；**不覆盖原图或旧结果**。两阶段均成功时保留超分中间图与最终组合图。写入失败在逐页信息中记录，不妨碍阅读，也不声称保存成功；在线页不会自动写到漫画目录。
 - 隐藏处理目录不会作为源页/章节重新扫描，避免重复处理或污染导入。普通漫画下载仍保留原始页面，不会自动把整本书替换为 AI 结果。
-- 用户明确选择 **CBZ / EPUB / PDF 整书导出**时，按当前全局/漫画专属设置处理已下载章节及封面，再从临时输出生成文件；不要求先逐页翻阅，不打包 `.venera-processed` 的历史版本。任一启用阶段失败则终止导出，不静默混入原图。
+- 用户明确选择 **CBZ / EPUB / PDF 整书导出**时，按当前全局/漫画专属设置处理已下载章节及封面，再从临时输出生成文件；不要求先逐页翻阅，不打包 `.cmanga-processed` 的历史版本。任一启用阶段失败则终止导出，不静默混入原图。
 - 阅读器“图像信息”列出当前章节每页并支持跳转，突出当前可见页。**每页都有“重新处理”按钮**：仅该页绕过处理缓存并重新推理，仍遵守前页失败屏障，不清空其他页面的结果。连续模式中，失败页和等待它的页面也提供原地重试入口。详情记录实际尺寸、每阶段状态、后端、缓存/执行信息、耗时、错误和本地结果路径；未加载、处理中、失败、取消及旧设置分别标示，不把请求值或别页操作当成本页实测结果。
+
+#### Historical 2.1.6 engineering evidence
+
+The following records describe pre-rebrand functional checks retained from this codebase. They are not a claim that CManga's new packaging or identity has been verified on those devices.
 
 2.1.6 验证边界：共享 Dart 回归测试 37 项通过，包括 20 页有序需求、失败屏障、重试、过期任务丢弃、缓存完整性、独立额度和完成页缓存直读。macOS ARM64 Apple M2 使用固定的 ONNX Runtime 1.29.0 Metal / OpenCV 4.11.0 框架完成上述 7 个兼容模型的真实 GPU 推理、参数重渲染和缓存检查；其余 3 个模型按纯 GPU 策略拒绝，未转 CPU。
 
@@ -79,7 +79,21 @@ Android 35 ARM64 平板模拟器的实际应用已验证连续阅读：第 2 页
 
 这些检查不是画质评测、性能承诺或所有图片/设备的保证。Android / iOS 真机、旧系统、Android NNAPI 和 Windows DirectML 没有据此获得本次运行验证；Apple M2 原生 smoke 也不能代替其他 Apple 设备验收。CI 包含四端构建、iOS 模拟器及无签名设备构建、macOS 原生 Metal smoke；没有硬件 GPU 的 CI 机器只能证明构建及明确的不可用诊断。Linux 不在本次发布范围。
 
-## 界面展示 (Screenshots)
+## CManga Interface
+
+Actual Windows screenshots of CManga, with Light and Dark themes, and responsive navigation.
+
+![CManga Desktop](screenshots/cmanga_home.png)
+
+| Light Theme | Dark Theme |
+| --- | --- |
+| ![CManga Light](screenshots/cmanga_light.png) | ![CManga Dark](screenshots/cmanga_dark.png) |
+
+Branding Verification: Windows Release built successfully, and bundle runtime files and architectures passed `python windows/build.py --verify-only`. The actual application was checked on Home, About, Settings, Search, and History, including narrow-window layout and light/dark modes. All 37 existing Dart tests passed; targeted UI Analysis found no issues. This rebrand's Android, iOS, macOS, and Linux builds were not run locally; Apple Pod checksums must regenerate via `pod install` on macOS.
+
+## Image Processing Examples
+
+The following images retain earlier processing comparisons, not current CManga UI Screenshots.
 
 ### 漫画文字翻译 (Comic Text Translation)
 
@@ -96,13 +110,6 @@ Android 35 ARM64 平板模拟器的实际应用已验证连续阅读：第 2 页
 |:---:|:---:|
 | ![Colorization Before](screenshots/colorization_before.jpg) | ![Colorization After](screenshots/colorization_after.jpg) |
 
-### 其他界面 (Other Screenshots)
-
-| 漫画源 (Comic Source) | 设置菜单 (Settings) |
-|:---:|:---:|
-| ![Comic Source](screenshots/comic_source.jpg) | ![Settings](screenshots/settings.jpg) |
-| **Anime4K 设置** | **阅读界面 (Reader)** |
-| ![Anime4K Settings](screenshots/anime4k_settings.jpg) | ![Reader View](screenshots/reader_view.jpg) |
 
 ## Build from source
 1. Clone the repository
@@ -110,7 +117,7 @@ Android 35 ARM64 平板模拟器的实际应用已验证连续阅读：第 2 页
 3. Install rust, see [rustup.rs](https://rustup.rs/)
 4. Build for your platform: e.g. `flutter build apk`
 
-Windows 构建还需要 Visual Studio 2022 的 C++ 桌面开发工作负载、Windows SDK 和 PATH 中的 NuGet。Flutter 3.41 按宿主架构构建：ARM64 完整应用需要 ARM64 Windows、原生 ARM64 Flutter SDK 及对应 MSVC 工具；不能用 x64 宿主构建后直接贴 ARM64 标签。AI 依赖由 CMake 从固定来源下载并校验 SHA-256：ONNX Runtime CPU/DirectML 1.22.0、DirectML 1.15.4、OpenCV 4.11.0（静态裁剪模块）。可用 `VENERA_AI_DOWNLOAD_CACHE` 指定下载缓存目录。
+Windows 构建还需要 Visual Studio 2022 的 C++ 桌面开发工作负载、Windows SDK 和 PATH 中的 NuGet。Flutter 3.41 按宿主架构构建：ARM64 完整应用需要 ARM64 Windows、原生 ARM64 Flutter SDK 及对应 MSVC 工具；不能用 x64 宿主构建后直接贴 ARM64 标签。AI 依赖由 CMake 从固定来源下载并校验 SHA-256：ONNX Runtime CPU/DirectML 1.22.0、DirectML 1.15.4、OpenCV 4.11.0（静态裁剪模块）。可用 `CMANGA_AI_DOWNLOAD_CACHE` 指定下载缓存目录。
 
 ```powershell
 flutter pub get
@@ -123,9 +130,9 @@ python windows/build.py --verify-only
 不依赖 Flutter 界面的真实模型 smoke：
 
 ```powershell
-cmake -S windows -B build/ai-smoke -A x64 -DVENERA_AI_STANDALONE=ON
-cmake --build build/ai-smoke --config Release --target venera_image_ai_smoke
-build/ai-smoke/Release/venera_image_ai_smoke.exe --model assets/models/anime4k_acnet.onnx --image screenshots/colorization_before.jpg --output build/ai-smoke/result.png --type esrgan --backend cpu --scale 1.3 --renders 3 --check-strength true
+cmake -S windows -B build/ai-smoke -A x64 -DCMANGA_AI_STANDALONE=ON
+cmake --build build/ai-smoke --config Release --target cmanga_image_ai_smoke
+build/ai-smoke/Release/cmanga_image_ai_smoke.exe --model assets/models/anime4k_acnet.onnx --image screenshots/colorization_before.jpg --output build/ai-smoke/result.png --type esrgan --backend cpu --scale 1.3 --renders 3 --check-strength true
 ```
 
 smoke 输出实际后端、输出尺寸、推理次数、缓存命中和峰值内存；`--check-strength true` 额外验证 50% 是 0% 与 100% 的线性光中间结果且透明度不变，`--backend auto` 可在有兼容 GPU 的 Windows 机器验证 DirectML。交叉编译成功不代表目标设备运行验证。
@@ -145,20 +152,31 @@ flutter build ios --release --no-codesign
 brew install cmake opencv
 cmake -S native/image_ai -B build/ai-smoke -DCMAKE_BUILD_TYPE=Release
 cmake --build build/ai-smoke --parallel 2
-build/ai-smoke/venera_image_ai_smoke --model assets/models/anime4k_acnet.onnx --image screenshots/colorization_before.jpg --output build/ai-smoke/result.png --type esrgan --backend metal --scale 1.3 --renders 3 --check-strength true
+build/ai-smoke/cmanga_image_ai_smoke --model assets/models/anime4k_acnet.onnx --image screenshots/colorization_before.jpg --output build/ai-smoke/result.png --type esrgan --backend metal --scale 1.3 --renders 3 --check-strength true
 ```
 
 该独立 CMake 目标固定使用应用的 Metal ORT，但 OpenCV 默认来自主机开发库；应用的 CocoaPods OpenCV 则固定为 4.11.0。两种 OpenCV 链接方式的验证应分别记录，不能用 Homebrew 或公共 CocoaPods 的 CPU-only ONNX Runtime 替代硬件 Metal 框架。
+
+### Releases and AltStore
+
+- CI names packages `cmanga-*`, publishes only successful builds from the current repository's default branch, and creates `cmanga-v<version>` releases in `github.repository`. The app version remains **2.1.6+216**. No old app release is renamed or used as a CManga download.
+- Set `--dart-define=CMANGA_REPOSITORY=owner/repo` when building for a real release repository (substitute its actual name). CI supplies its current repository automatically. Without this setting, the app does not claim a configured CManga release service.
+- `alt_store.json` deliberately starts with an empty app list. Run `python update_alt_store.py` with `CMANGA_RELEASE_REPOSITORY` set to the actual `owner/repo`, or use `GITHUB_REPOSITORY` in CI. Python 3's standard library is sufficient; `GITHUB_TOKEN`/`GH_TOKEN` is optional for API access.
+- The generator reads that repository's published, non-prerelease GitHub releases and accepts only `cmanga-ios-<version>+<build>.ipa` assets. It downloads each candidate, checks its real byte size and embedded `Info.plist` for **CManga / com.cmanga.reader / matching version and build**, and uses the actual release URL, date and minimum iOS version. Missing configuration or a disguised/wrong-identity CManga IPA fails without replacing the feed. Historical non-CManga IPAs are excluded; no eligible release produces an empty source.
+- Publish the generated JSON at a URL you actually control before adding it to AltStore. No CManga website or feed hosting is assumed. The CI IPA is unsigned; installation still requires your own legitimate signing method.
+
+### Anime4K implementation history
+
+The [CManga Anime4K integration notes](Anime4K_Integration_Guide_CManga.md), [original module guide](ANIME4K_INTEGRATION_GUIDE.md) and [fix history](ANIME4K_FIXES_SUMMARY.md) preserve the original v1 integration context. Current native AI requirements and commands are documented above.
 
 ## Create a new comic source
 See [Comic Source](doc/comic_source.md)
 
 ## Thanks
 
-### particularly thanks
+### Reader foundations
 
-Modify and add functions based on
-[Venera](https://github.com/venera-app/venera)
+CManga retains the contributions and licenses of [Venera](https://github.com/venera-app/venera) and the historical Venera-SSR work from which this codebase derives. Model-hosting URLs that still contain the earlier project name identify real upstream assets, not CManga releases. See [LICENSE](LICENSE) and the model-specific source and license notes above.
 
 ### Tags Translation
 [![Readme Card](https://github-readme-stats.vercel.app/api/pin/?username=EhTagTranslation&repo=Database)](https://github.com/EhTagTranslation/Database)

@@ -2,7 +2,7 @@
 
 ## Introduction
 
-Venera supports importing comics from local files.
+CManga supports importing comics from local files.
 However, the comic files must be in a specific format.
 
 ## Comic Directory
@@ -50,11 +50,11 @@ The name of directory will be used as comic title. And the name of chapter direc
 
 ## Archive
 
-Venera supports importing comics from archive files.
+CManga supports importing comics from archive files.
 
 The archive file must follow [Comic Book Archive](https://en.wikipedia.org/wiki/Comic_book_archive_file) format.
 
-Currently, Venera supports the following archive formats:
+Currently, CManga supports the following archive formats:
 - `.cbz`
 - `.cb7`
 - `.zip`

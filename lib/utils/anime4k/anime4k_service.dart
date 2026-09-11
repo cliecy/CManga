@@ -5,7 +5,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
-import 'package:venera/foundation/log.dart';
+import 'package:cmanga/foundation/log.dart';
 
 import '../image_ai_service.dart';
 import '../image_ai_cache.dart';

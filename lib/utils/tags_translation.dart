@@ -8,8 +8,8 @@ https://github.com/EhTagTranslation/Database/tree/master/database
 
 import 'dart:convert';
 import 'package:flutter/services.dart';
-import 'package:venera/foundation/app.dart';
-import 'package:venera/utils/ext.dart';
+import 'package:cmanga/foundation/app.dart';
+import 'package:cmanga/utils/ext.dart';
 
 extension TagsTranslation on String{
   static final Map<String, Map<String, String>> _data = {};

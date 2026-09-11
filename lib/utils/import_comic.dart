@@ -1,16 +1,16 @@
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
-import 'package:venera/components/components.dart';
-import 'package:venera/foundation/app.dart';
-import 'package:venera/foundation/comic_source/comic_source.dart';
-import 'package:venera/foundation/comic_type.dart';
-import 'package:venera/foundation/favorites.dart';
-import 'package:venera/foundation/local.dart';
-import 'package:venera/foundation/log.dart';
+import 'package:cmanga/components/components.dart';
+import 'package:cmanga/foundation/app.dart';
+import 'package:cmanga/foundation/comic_source/comic_source.dart';
+import 'package:cmanga/foundation/comic_type.dart';
+import 'package:cmanga/foundation/favorites.dart';
+import 'package:cmanga/foundation/local.dart';
+import 'package:cmanga/foundation/log.dart';
 import 'package:sqlite3/sqlite3.dart' as sql;
-import 'package:venera/utils/ext.dart';
-import 'package:venera/utils/translations.dart';
+import 'package:cmanga/utils/ext.dart';
+import 'package:cmanga/utils/translations.dart';
 import 'cbz.dart';
 import 'io.dart';
 import 'processed_image_store.dart';

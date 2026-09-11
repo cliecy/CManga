@@ -31,11 +31,16 @@ jobs:
         run: flutter test
 
       - name: Build APK
-        run: flutter build apk --release
+        run: flutter build apk --release --dart-define=CMANGA_REPOSITORY=${{ github.repository }}
+
+      - name: Package CManga APK
+        run: |
+          VERSION=$(sed -n 's/^version: //p' pubspec.yaml)
+          mv build/app/outputs/flutter-apk/app-release.apk "build/app/outputs/flutter-apk/cmanga-android-${VERSION}.apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-release-apk
-          path: build/app/outputs/flutter-apk/*.apk
+          name: cmanga-release-android
+          path: build/app/outputs/flutter-apk/cmanga-android-*.apk
 

@@ -54,7 +54,7 @@ def main():
             "dawn_archive_sha1": DAWN_ARCHIVE_SHA1,
             "patch": digest(HERE / "ort-metal.patch"),
             "builder": digest(Path(__file__)),
-            "podspec": digest(HERE / "VeneraOnnxRuntime.podspec"),
+            "podspec": digest(HERE / "CMangaOnnxRuntime.podspec"),
             "xcode": xcode,
         }
         platforms = ("macos", "ios") if args.platform == "all" else (args.platform,)
@@ -73,7 +73,7 @@ def main():
         if not python.exists():
             run(sys.executable, "-m", "venv", tools)
         requirements = ["cmake==3.31.10", "packaging==25.0", "PyYAML==6.0.2"]
-        tool_stamp = tools / "venera-requirements.json"
+        tool_stamp = tools / "cmanga-requirements.json"
         if not tool_stamp.exists() or json.loads(tool_stamp.read_text()) != requirements:
             run(python, "-m", "pip", "install", "--disable-pip-version-check", *requirements)
             tool_stamp.write_text(json.dumps(requirements))
@@ -83,7 +83,7 @@ def main():
         # Include patch identity in checkout directory: never mutate/reuse a
         # differently patched source tree or reset a developer's checkout.
         source = CACHE / ("source-" + ORT_COMMIT[:12] + "-" + identity["patch"][:12])
-        ready = source / ".venera-source-ready"
+        ready = source / ".cmanga-source-ready"
         if not ready.exists():
             if source.exists():
                 shutil.rmtree(source)
@@ -142,7 +142,7 @@ def main():
             if staging.exists():
                 shutil.rmtree(staging)
             shutil.copytree(assembled, staging, symlinks=True)
-            shutil.copy2(HERE / "VeneraOnnxRuntime.podspec", staging)
+            shutil.copy2(HERE / "CMangaOnnxRuntime.podspec", staging)
             # Preserve upstream notices alongside the vendored static framework.
             shutil.copy2(source / "ThirdPartyNotices.txt", staging)
             shutil.copy2(source / "cmake/deps.txt", staging / "dependencies.txt")

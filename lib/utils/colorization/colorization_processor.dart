@@ -4,8 +4,8 @@ import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:venera/utils/image_ai_service.dart';
-import 'package:venera/utils/model_download.dart';
+import 'package:cmanga/utils/image_ai_service.dart';
+import 'package:cmanga/utils/model_download.dart';
 
 /// A model's explicit native pipeline, installation and publishing provenance.
 class ColorizationModelVariant {
@@ -90,7 +90,7 @@ class ColorizationModelManager {
       fileName: 'anime_grayscale2color_rgb256.onnx',
       sizeBytes: 422934355,
       defaultUrls: [
-        'https://github.com/cliecy/Venera-SSR/releases/download/image-ai-models-20260909/anime_grayscale2color_rgb256.onnx',
+        'https://github.com/cliecy/CManga/releases/download/image-ai-models-20260909/anime_grayscale2color_rgb256.onnx',
       ],
       sourceUrl: 'https://github.com/Dakini/AnimeColorDeOldify',
       licenseNote:
@@ -473,7 +473,7 @@ class ColorizationModelManager {
     try {
       final request = await client.getUrl(Uri.parse(url));
       request.followRedirects = true;
-      request.headers.set('User-Agent', 'Venera/1.0');
+      request.headers.set('User-Agent', 'CManga/1.0');
       request.headers.set('Accept', '*/*');
       if (startByte > 0) request.headers.set('Range', 'bytes=$startByte-');
       final response = await request.close();

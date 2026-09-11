@@ -4,9 +4,9 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:venera/foundation/app.dart';
-import 'package:venera/foundation/comic_source/comic_source.dart';
-import 'package:venera/utils/data_sync.dart';
+import 'package:cmanga/foundation/app.dart';
+import 'package:cmanga/foundation/comic_source/comic_source.dart';
+import 'package:cmanga/utils/data_sync.dart';
 import 'package:window_manager/window_manager.dart';
 
 const _kTitleBarHeight = 36.0;
@@ -140,7 +140,7 @@ class _WindowFrameState extends State<WindowFrame> {
                             child: DragToMoveArea(
                               child:
                                   Text(
-                                        'VeneraSSR',
+                                        'CManga',
                                         style: TextStyle(
                                           fontSize: 13,
                                           color:

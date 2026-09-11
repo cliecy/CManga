@@ -1,10 +1,10 @@
 # Project-level configuration.
 cmake_minimum_required(VERSION 3.14)
-project(venera LANGUAGES C CXX)
+project(cmanga LANGUAGES C CXX)
 
 # The name of the executable created for the application. Change this to change
 # the on-disk name of your application.
-set(BINARY_NAME "venera")
+set(BINARY_NAME "cmanga")
 
 # Explicitly opt in to modern CMake behaviors to avoid warnings with recent
 # versions of CMake.
@@ -30,9 +30,9 @@ set(CMAKE_SHARED_LINKER_FLAGS_PROFILE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE}")
 set(CMAKE_C_FLAGS_PROFILE "${CMAKE_C_FLAGS_RELEASE}")
 set(CMAKE_CXX_FLAGS_PROFILE "${CMAKE_CXX_FLAGS_RELEASE}")
 # Standalone CPU/DirectML real-model smoke needs no generated Flutter project.
-option(VENERA_AI_STANDALONE "Build only the native image AI smoke executable" OFF)
+option(CMANGA_AI_STANDALONE "Build only the native image AI smoke executable" OFF)
 include(cmake/ImageAiTarget.cmake)
-if(VENERA_AI_STANDALONE)
+if(CMANGA_AI_STANDALONE)
   return()
 endif()
 
@@ -96,7 +96,7 @@ set(INSTALL_BUNDLE_LIB_DIR "${CMAKE_INSTALL_PREFIX}")
 install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}"
   COMPONENT Runtime)
 
-venera_ai_install_runtime()
+cmanga_ai_install_runtime()
 # Ship the target architecture's redistributable CRT app-local. Users should
 # not need Visual Studio or a separately installed VC runtime for AI processing.
 set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION "${CMAKE_INSTALL_PREFIX}")

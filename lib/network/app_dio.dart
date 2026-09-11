@@ -4,10 +4,10 @@ import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:flutter/services.dart';
 import 'package:rhttp/rhttp.dart' as rhttp;
-import 'package:venera/foundation/appdata.dart';
-import 'package:venera/foundation/log.dart';
-import 'package:venera/network/cache.dart';
-import 'package:venera/network/proxy.dart';
+import 'package:cmanga/foundation/appdata.dart';
+import 'package:cmanga/foundation/log.dart';
+import 'package:cmanga/network/cache.dart';
+import 'package:cmanga/network/proxy.dart';
 
 import '../foundation/app.dart';
 import 'cloudflare.dart';
@@ -224,7 +224,7 @@ class RHttpAdapter implements HttpClientAdapter {
   ) async {
     if (options.headers['User-Agent'] == null &&
         options.headers['user-agent'] == null) {
-      options.headers['User-Agent'] = "venera/v${App.version}";
+      options.headers['User-Agent'] = "cmanga/v${App.version}";
     }
 
     var res = await rhttp.Rhttp.request(

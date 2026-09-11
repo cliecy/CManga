@@ -1,4 +1,4 @@
-package com.github.kiastr.venera_ssr
+package com.cmanga.reader
 
 import android.Manifest
 import android.app.Activity
@@ -28,7 +28,7 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugins.GeneratedPluginRegistrant
-import com.github.kiastr.venera_ssr.colorize.ColorizePlugin
+import com.cmanga.reader.colorize.ColorizePlugin
 import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicInteger
@@ -107,7 +107,7 @@ class MainActivity : FlutterFragmentActivity() {
         GeneratedPluginRegistrant.registerWith(flutterEngine)
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
-            "venera/method_channel"
+            "cmanga/method_channel"
         ).setMethodCallHandler { call, res ->
             when (call.method) {
                 "getProxy" -> res.success(getProxy())
@@ -141,7 +141,7 @@ class MainActivity : FlutterFragmentActivity() {
             }
         }
 
-        val channel = EventChannel(flutterEngine.dartExecutor.binaryMessenger, "venera/volume")
+        val channel = EventChannel(flutterEngine.dartExecutor.binaryMessenger, "cmanga/volume")
         channel.setStreamHandler(
             object : EventChannel.StreamHandler {
                 override fun onListen(arguments: Any?, events: EventChannel.EventSink) {
@@ -159,20 +159,20 @@ class MainActivity : FlutterFragmentActivity() {
                 }
             })
 
-        val storageChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "venera/storage")
+        val storageChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "cmanga/storage")
         storageChannel.setMethodCallHandler { _, res ->
             requestStoragePermission { result ->
                 res.success(result)
             }
         }
 
-        val selectFileChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "venera/select_file")
+        val selectFileChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "cmanga/select_file")
         selectFileChannel.setMethodCallHandler { req, res ->
             val mimeType = req.arguments<String>()
             openFile(res, mimeType!!)
         }
 
-        val shareTextChannel = EventChannel(flutterEngine.dartExecutor.binaryMessenger, "venera/text_share")
+        val shareTextChannel = EventChannel(flutterEngine.dartExecutor.binaryMessenger, "cmanga/text_share")
         shareTextChannel.setStreamHandler(
             object : EventChannel.StreamHandler {
                 override fun onListen(arguments: Any?, events: EventChannel.EventSink) {
@@ -192,7 +192,7 @@ class MainActivity : FlutterFragmentActivity() {
                 }
             })
 
-        // 图像上色原生核心（MethodChannel: com.github.kiastr.venera_ssr/colorize）
+        // 图像上色原生核心（MethodChannel: com.cmanga.reader/colorize）
         ColorizePlugin.registerWith(this, flutterEngine.dartExecutor.binaryMessenger)
     }
 
@@ -389,7 +389,7 @@ class MainActivity : FlutterFragmentActivity() {
             if(tmp.exists()) {
                 tmp.delete()
             }
-            Log.i("Venera", "copy file (${fileName}) to ${tmp.absolutePath}")
+            Log.i("CManga", "copy file (${fileName}) to ${tmp.absolutePath}")
             Thread {
                 try {
                     contentResolver.openInputStream(uri)?.use { input ->

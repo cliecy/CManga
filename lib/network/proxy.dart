@@ -1,7 +1,7 @@
 import 'package:flutter/services.dart';
-import 'package:venera/foundation/app.dart';
-import 'package:venera/foundation/appdata.dart';
-import 'package:venera/utils/ext.dart';
+import 'package:cmanga/foundation/app.dart';
+import 'package:cmanga/foundation/appdata.dart';
+import 'package:cmanga/utils/ext.dart';
 
 String? _cachedProxy;
 
@@ -26,7 +26,7 @@ Future<String?> _getProxy() async {
 
   String res;
   if (!App.isLinux) {
-    const channel = MethodChannel("venera/method_channel");
+    const channel = MethodChannel("cmanga/method_channel");
     try {
       res = await channel.invokeMethod("getProxy");
     } catch (e) {

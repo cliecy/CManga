@@ -4,12 +4,12 @@ import 'dart:isolate';
 import 'package:flutter/services.dart';
 import 'package:flutter_file_dialog/flutter_file_dialog.dart';
 import 'package:flutter_saf/flutter_saf.dart';
-import 'package:venera/foundation/app.dart';
-import 'package:venera/utils/ext.dart';
+import 'package:cmanga/foundation/app.dart';
+import 'package:cmanga/utils/ext.dart';
 import 'package:path/path.dart' as p;
 import 'package:share_plus/share_plus.dart' as s;
 import 'package:file_selector/file_selector.dart' as file_selector;
-import 'package:venera/utils/file_type.dart';
+import 'package:cmanga/utils/file_type.dart';
 
 export 'dart:io';
 export 'dart:typed_data';
@@ -217,7 +217,7 @@ class DirectoryPicker {
     }
   });
 
-  static const _methodChannel = MethodChannel("venera/method_channel");
+  static const _methodChannel = MethodChannel("cmanga/method_channel");
 
   Future<Directory?> pickDirectory({bool directAccess = false}) async {
     IO._isSelectingFiles = true;
@@ -255,7 +255,7 @@ class DirectoryPicker {
 }
 
 class IOSDirectoryPicker {
-  static const MethodChannel _channel = MethodChannel("venera/method_channel");
+  static const MethodChannel _channel = MethodChannel("cmanga/method_channel");
 
   // 调用 iOS 目录选择方法
   static Future<String?> selectDirectory() async {
@@ -284,7 +284,7 @@ Future<FileSelectResult?> selectFile({required List<String> ext}) async {
     );
     FileSelectResult? file;
     if (App.isAndroid) {
-      const selectFileChannel = MethodChannel("venera/select_file");
+      const selectFileChannel = MethodChannel("cmanga/select_file");
       String mimeType = "*/*";
       if (ext.length == 1) {
         mimeType = FileType.fromExtension(ext[0]).mime;

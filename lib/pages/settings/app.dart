@@ -101,7 +101,7 @@ class _AppSettingsState extends State<AppSettings> {
           callback: () async {
             var controller = showLoadingDialog(context);
             var file = await exportAppData(false);
-            await saveFile(filename: "data.venera", file: file);
+            await saveFile(filename: "data.cmanga", file: file);
             controller.close();
           },
           actionTitle: 'Export'.tl,
@@ -110,7 +110,7 @@ class _AppSettingsState extends State<AppSettings> {
           title: "Import App Data".tl,
           callback: () async {
             var controller = showLoadingDialog(context);
-            var file = await selectFile(ext: ['venera', 'picadata']);
+            var file = await selectFile(ext: ['cmanga', 'picadata']);
             if (file != null) {
               var cacheFile =
                   File(FilePath.join(App.cachePath, "import_data_temp"));

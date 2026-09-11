@@ -21,7 +21,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: build/apple-ort
-          key: apple-ort-macos-${{ runner.arch }}-${{ hashFiles('native/apple/build_ort_metal.py', 'native/apple/ort-metal.patch', 'native/apple/VeneraOnnxRuntime.podspec') }}
+          key: apple-ort-macos-${{ runner.arch }}-${{ hashFiles('native/apple/build_ort_metal.py', 'native/apple/ort-metal.patch', 'native/apple/CMangaOnnxRuntime.podspec') }}
           restore-keys: apple-ort-macos-${{ runner.arch }}-
 
       - name: Build native ONNX WebGPU Metal dependency
@@ -48,7 +48,7 @@ jobs:
         run: flutter config --enable-macos-desktop
         
       - name: Build macOS
-        run: flutter build macos --release
+        run: flutter build macos --release --dart-define=CMANGA_REPOSITORY=${{ github.repository }}
 
       - name: Build native AI smoke
         run: |
@@ -80,7 +80,7 @@ jobs:
               + chunk(b"IDAT", zlib.compress(pixels)) + chunk(b"IEND", b""))
           for backend in ("metal", "auto"):
               result = subprocess.run([
-                  "build/ai-smoke/venera_image_ai_smoke",
+                  "build/ai-smoke/cmanga_image_ai_smoke",
                   "--model", "assets/models/anime4k_acnet.onnx",
                   "--image", str(image), "--output", str(output / f"{backend}.png"),
                   "--type", "esrgan", "--backend", backend, "--scale", "1.3",
@@ -92,7 +92,7 @@ jobs:
                       if line.startswith('{"error":')]
                   no_hardware = (
                       "Failed to get a WebGPU adapter",
-                      "Venera rejects non-Metal and software/CPU adapters.",
+                      "CManga rejects non-Metal and software/CPU adapters.",
                   )
                   if (errors and errors[-1]["error"] == "backend_unavailable"
                           and any(reason in errors[-1]["message"] for reason in no_hardware)):
@@ -115,14 +115,14 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: macOS-Metal-AI-smoke
+          name: cmanga-macos-metal-ai-smoke
           path: build/ai-smoke-results/
           if-no-files-found: warn
 
       - name: Package macOS Build
         run: |
           VERSION=$(grep "^version:" pubspec.yaml | head -1 | sed 's/version: //' | cut -d+ -f1)
-          ZIP_NAME="Venera-macOS-v$VERSION.zip"
+          ZIP_NAME="cmanga-macos-$VERSION.zip"
           cd build/macos/Build/Products/Release
           ditto -c -k --sequesterRsrc --keepParent *.app "$ZIP_NAME"
           VERIFY_DIR="$(mktemp -d)"
@@ -133,6 +133,6 @@ jobs:
       - name: Upload macOS Build
         uses: actions/upload-artifact@v4
         with:
-          name: app-release-macos
+          name: cmanga-release-macos
           path: build/macos/Build/Products/Release/*.zip
           if-no-files-found: error

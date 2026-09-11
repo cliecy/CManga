@@ -8,7 +8,7 @@ class AppDelegate: FlutterAppDelegate {
 
   override func applicationDidFinishLaunching(_ notification: Notification) {
       let controller: FlutterViewController = mainFlutterWindow?.contentViewController as! FlutterViewController
-      let methodChannel = FlutterMethodChannel(name: "venera/method_channel", binaryMessenger: controller.engine.binaryMessenger)
+      let methodChannel = FlutterMethodChannel(name: "cmanga/method_channel", binaryMessenger: controller.engine.binaryMessenger)
 
       methodChannel.setMethodCallHandler { (call, result) in
         switch call.method {
@@ -39,7 +39,7 @@ class AppDelegate: FlutterAppDelegate {
         }
       }
 
-      let clipboardChannel = FlutterMethodChannel(name: "venera/clipboard", binaryMessenger: controller.engine.binaryMessenger)
+      let clipboardChannel = FlutterMethodChannel(name: "cmanga/clipboard", binaryMessenger: controller.engine.binaryMessenger)
 
       clipboardChannel.setMethodCallHandler { (call, result) in
         switch call.method {

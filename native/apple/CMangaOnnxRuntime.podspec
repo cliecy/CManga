@@ -1,10 +1,10 @@
 Pod::Spec.new do |s|
-  s.name = 'VeneraOnnxRuntime'
+  s.name = 'CMangaOnnxRuntime'
   s.version = '1.29.0'
   s.summary = 'Pinned native ONNX Runtime WebGPU with hardware-only Dawn Metal.'
   s.homepage = 'https://github.com/microsoft/onnxruntime'
   s.license = { :type => 'MIT', :file => 'LICENSE' }
-  s.author = 'Microsoft and Venera contributors'
+  s.author = 'Microsoft and CManga contributors'
   s.source = { :git => 'https://github.com/microsoft/onnxruntime.git', :commit => '2e2543fbe9fae542f921d47a72d21d5a4ef0b710' }
   s.ios.deployment_target = '16.3'
   s.osx.deployment_target = '13.3'
