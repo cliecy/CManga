@@ -1,3 +1,4 @@
+import 'dart:ffi';
 import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -14,6 +15,15 @@ import 'package:cmanga/foundation/res.dart';
 import 'package:cmanga/network/download.dart';
 import 'package:cmanga/utils/epub.dart';
 import 'package:zip_flutter/zip_flutter.dart';
+
+bool _nativeZipAvailable() {
+  try {
+    DynamicLibrary.open('libzip_flutter.so');
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
 
 /// Integration test for the auto-download-new-chapters feature: a stub
 /// comic source (pure Dart closures, no JS engine) plus real SQLite
@@ -281,6 +291,9 @@ void main() {
     });
   });
 
+  var nativeSkip = !_nativeZipAvailable()
+      ? 'libzip_flutter.so not loadable in this environment'
+      : false;
   group('Epub import', () {
     test('imports spine-ordered images with cover and metadata', () async {
       var src = Directory(p.join(dataDir, 'epub_src'))..createSync(recursive: true);
@@ -342,7 +355,7 @@ void main() {
       expect(File(p.join(dest.path, '2.png')).readAsBytesSync(), [3]);
       expect(File(p.join(dest.path, '3.webp')).readAsBytesSync(), [4]);
       expect(File(p.join(dest.path, 'cover.jpg')).existsSync(), isTrue);
-    });
+    }, skip: nativeSkip);
 
     test('rejects an archive without container.xml', () async {
       var txt = File(p.join(dataDir, 'plain.txt'))..writeAsStringSync('hi');
@@ -351,7 +364,7 @@ void main() {
       zip.addFile('a.txt', txt.path);
       zip.close();
       expect(() => Epub.import(File(plainPath)), throwsA(predicate((e) => e.toString().contains('container.xml'))));
-    });
+    }, skip: nativeSkip);
   });
 }
 
