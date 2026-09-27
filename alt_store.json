@@ -1,0 +1,9 @@
+{
+  "name": "CManga",
+  "identifier": "com.cmanga.reader.source",
+  "subtitle": "Comics, with local AI.",
+  "description": "CManga is an independent comic reader with local AI enhancement, colorization and translation. No CManga iOS release is published in this source yet. Generate this feed from the configured CManga release repository after publishing a verified CManga IPA.",
+  "tintColor": "#167D8D",
+  "apps": [],
+  "news": []
+}

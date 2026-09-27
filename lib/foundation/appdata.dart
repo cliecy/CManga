@@ -1,0 +1,365 @@
+import 'dart:convert';
+
+import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:cmanga/foundation/app.dart';
+import 'package:cmanga/foundation/log.dart';
+import 'package:cmanga/utils/data_sync.dart';
+import 'package:cmanga/utils/init.dart';
+import 'package:cmanga/utils/io.dart';
+
+class Appdata with Init {
+  Appdata._create();
+
+  final Settings settings = Settings._create();
+
+  var searchHistory = <String>[];
+
+  bool _isSavingData = false;
+
+  Future<void> saveData([bool sync = true]) async {
+    while (_isSavingData) {
+      await Future.delayed(const Duration(milliseconds: 20));
+    }
+    _isSavingData = true;
+    try {
+      var futures = <Future>[];
+      var json = toJson();
+      var data = jsonEncode(json);
+      var file = File(FilePath.join(App.dataPath, 'appdata.json'));
+      futures.add(file.writeAsString(data));
+
+      var disableSyncFields = json["settings"]["disableSyncFields"] as String;
+      if (disableSyncFields.isNotEmpty) {
+        var json4sync = jsonDecode(data);
+        List<String> customDisableSync = splitField(disableSyncFields);
+        for (var field in customDisableSync) {
+          json4sync["settings"].remove(field);
+        }
+        var data4sync = jsonEncode(json4sync);
+        var file4sync = File(FilePath.join(App.dataPath, 'syncdata.json'));
+        futures.add(file4sync.writeAsString(data4sync));
+      }
+
+      await Future.wait(futures);
+    } finally {
+      _isSavingData = false;
+    }
+    if (sync) {
+      DataSync().uploadData();
+    }
+  }
+
+  void addSearchHistory(String keyword) {
+    if (searchHistory.contains(keyword)) {
+      searchHistory.remove(keyword);
+    }
+    searchHistory.insert(0, keyword);
+    if (searchHistory.length > 50) {
+      searchHistory.removeLast();
+    }
+    saveData();
+  }
+
+  void removeSearchHistory(String keyword) {
+    searchHistory.remove(keyword);
+    saveData();
+  }
+
+  void clearSearchHistory() {
+    searchHistory.clear();
+    saveData();
+  }
+
+  Map<String, dynamic> toJson() {
+    return {'settings': settings._data, 'searchHistory': searchHistory};
+  }
+
+  List<String> splitField(String merged) {
+    return merged
+        .split(',')
+        .map((field) => field.trim())
+        .where((field) => field.isNotEmpty)
+        .toList();
+  }
+
+  /// Following fields are related to device-specific data or are security
+  /// critical and should not be synced. Security-critical fields are
+  /// excluded so a tampered sync bundle cannot disable certificate
+  /// verification, redirect DNS or point the source list at a malicious
+  /// server.
+  static const _disableSync = [
+    "proxy",
+    "authorizationRequired",
+    "customImageProcessing",
+    "webdav",
+    "disableSyncFields",
+    "comicSourceListUrl",
+    "ignoreBadCertificate",
+    "enableDnsOverrides",
+    "dnsOverrides",
+  ];
+
+  /// Sync data from another device
+  void syncData(Map<String, dynamic> data) {
+    if (data['settings'] is Map) {
+      var settings = data['settings'] as Map<String, dynamic>;
+
+      List<String> customDisableSync = splitField(
+        this.settings["disableSyncFields"] as String,
+      );
+
+      for (var key in settings.keys) {
+        if (!_disableSync.contains(key) && !customDisableSync.contains(key)) {
+          this.settings[key] = settings[key];
+        }
+      }
+    }
+    searchHistory = List.from(data['searchHistory'] ?? []);
+    saveData();
+  }
+
+  var implicitData = <String, dynamic>{};
+
+  void writeImplicitData() async {
+    while (_isSavingData) {
+      await Future.delayed(const Duration(milliseconds: 20));
+    }
+    _isSavingData = true;
+    try {
+      var file = File(FilePath.join(App.dataPath, 'implicitData.json'));
+      await file.writeAsString(jsonEncode(implicitData));
+    } finally {
+      _isSavingData = false;
+    }
+  }
+
+  @override
+  Future<void> doInit() async {
+    var dataPath = (await getApplicationSupportDirectory()).path;
+    var file = File(FilePath.join(dataPath, 'appdata.json'));
+    if (!await file.exists()) {
+      return;
+    }
+    try {
+      var json = jsonDecode(await file.readAsString());
+      for (var key in (json['settings'] as Map<String, dynamic>).keys) {
+        if (json['settings'][key] != null) {
+          settings[key] = json['settings'][key];
+        }
+      }
+      searchHistory = List.from(json['searchHistory']);
+    } catch (e) {
+      Log.error("Appdata", "Failed to load appdata", e);
+    }
+    try {
+      var implicitDataFile = File(FilePath.join(dataPath, 'implicitData.json'));
+      if (await implicitDataFile.exists()) {
+        implicitData = jsonDecode(await implicitDataFile.readAsString());
+      }
+    } catch (e) {
+      Log.error("Appdata", "Failed to load implicit data", e);
+      Log.info("Appdata", "Resetting implicit data");
+      var implicitDataFile = File(FilePath.join(dataPath, 'implicitData.json'));
+      implicitDataFile.deleteIgnoreError();
+    }
+  }
+}
+
+final appdata = Appdata._create();
+
+class Settings with ChangeNotifier {
+  Settings._create();
+
+  static const _integerSettings = {
+    'preloadImageCount',
+    'downloadThreads',
+    'autoPageTurningInterval',
+    'readerScreenPicNumberForLandscape',
+    'readerScreenPicNumberForPortrait',
+  };
+
+  static dynamic _normalizeNumericSetting(String key, dynamic value) {
+    // Older sliders saved these integer settings as JSON doubles.
+    if (_integerSettings.contains(key) && value is double) {
+      return value.round();
+    }
+    return value;
+  }
+
+  final _data = <String, dynamic>{
+    'comicDisplayMode': 'detailed', // detailed, brief
+    'comicTileScale': 1.00, // 0.75-1.25
+    'color': 'teal', // teal, system, red, pink, purple, green, orange, blue
+    'theme_mode': 'system', // light, dark, system
+    'newFavoriteAddTo': 'end', // start, end
+    'moveFavoriteAfterRead': 'none', // none, end, start
+    'proxy': 'system', // direct, system, proxy string
+    'explore_pages': [],
+    'categories': [],
+    'favorites': [],
+    'searchSources': null,
+    'showFavoriteStatusOnTile': true,
+    'showHistoryStatusOnTile': false,
+    'blockedWords': [],
+    'blockedCommentWords': [],
+    'defaultSearchTarget': null,
+    'autoPageTurningInterval': 5, // in seconds
+    'readerMode': 'galleryLeftToRight', // values of [ReaderMode]
+    'readerScreenPicNumberForLandscape': 1, // 1 - 5
+    'readerScreenPicNumberForPortrait': 1, // 1 - 5
+    'enableTapToTurnPages': true,
+    'reverseTapToTurnPages': false,
+    'enablePageAnimation': true,
+    'language': 'system', // system, zh-CN, zh-TW, en-US
+    'cacheSize': 2048, // in MB
+    'downloadThreads': 5,
+    'enableLongPressToZoom': true,
+    'longPressZoomPosition': "press", // press, center
+    'limitImageWidth': true,
+    'webdav': [], // empty means not configured
+    "disableSyncFields": "", // "field1, field2, ..."
+    'dataVersion': 0,
+    'quickFavorite': null,
+    'enableTurnPageByVolumeKey': true,
+    'enableClockAndBatteryInfoInReader': true,
+    'quickCollectImage': 'No', // No, DoubleTap, Swipe
+    'authorizationRequired': false,
+    'onClickFavorite': 'viewDetail', // viewDetail, read
+    'enableDnsOverrides': false,
+    'dnsOverrides': {},
+    'enableCustomImageProcessing': false,
+    'customImageProcessing': defaultCustomImageProcessing,
+    'sni': true,
+    'autoAddLanguageFilter': 'none', // none, chinese, english, japanese
+    'comicSourceListUrl': _defaultSourceListUrl,
+    'preloadImageCount': 4,
+    'readerBrightness': 0,
+    'followUpdatesFolder': null,
+    'autoDownloadNewChapters': false,
+    'autoDownloadChapterLimit': 0,
+    'imageDiskCacheSize': 512, // MB
+    'keepScreenOnWhileReading': false,
+    'readerContrast': 1,
+    'readerSaturation': 1,
+    'initialPage': '0',
+    'comicListDisplayMode': 'paging', // paging, continuous
+    'showPageNumberInReader': true,
+    'showSingleImageOnFirstPage': false,
+    'enableDoubleTapToZoom': true,
+    'reverseChapterOrder': false,
+    'showSystemStatusBar': false,
+    'comicSpecificSettings': <String, Map<String, dynamic>>{},
+    'ignoreBadCertificate': false,
+    'readerScrollSpeed': 1.0, // 0.5 - 3.0
+    'localFavoritesFirst': true,
+    'autoCloseFavoritePanel': false,
+    'showChapterComments': true, // show chapter comments in reader
+    'showChapterCommentsAtEnd':
+        false, // show chapter comments at end of chapter
+    'enableAnime4K': false, // enable Anime4K super-resolution
+    'anime4KScaleFactor': 2.0, // upscale factor (1.0 - 4.0), v1 only
+    'anime4KPushStrength':
+        0.15, // line refinement strength (0.0 - 1.0), v1 only; 配合边缘保护避免侵蚀细线
+    'anime4KPushGradStrength':
+        1.0, // gradient refinement strength (0.0 - 1.0), v1 only
+    'anime4KVersion': 'v1', // v1 CPU algorithm or v4 AI model
+    'anime4KV4Intensity': 1.0, // AI output contrast, not enhancement strength
+    'anime4KV4OutputScale': 0.0, // 0 follows the validated model's native scale
+    'anime4KEnhancementStrength':
+        1.0, // blend between resized source and enhanced output
+    'imageAiBackend': 'auto', // platform acceleration with CPU fallback, or cpu; webgpu on Linux
+    'imageAiCacheSizeMiB': 2048, // shared AI disk cache pool (2 GiB)
+    'enableColorization': false, // enable image colorization
+    'colorizationIntensity': 1.0, // color concentration (0.0 - 1.2)
+  };
+
+  operator [](String key) {
+    return _data[key];
+  }
+
+  operator []=(String key, dynamic value) {
+    if (key == 'comicSpecificSettings') {
+      for (final readerSettings in (value as Map<String, dynamic>).values) {
+        (readerSettings as Map<String, dynamic>).updateAll(
+          _normalizeNumericSetting,
+        );
+      }
+    }
+    _data[key] = _normalizeNumericSetting(key, value);
+    if (key != "dataVersion") {
+      notifyListeners();
+    }
+  }
+
+  void setEnabledComicSpecificSettings(
+    String comicId,
+    String sourceKey,
+    bool enabled,
+  ) {
+    setReaderSetting(comicId, sourceKey, "enabled", enabled);
+  }
+
+  bool isComicSpecificSettingsEnabled(String? comicId, String? sourceKey) {
+    if (comicId == null || sourceKey == null) {
+      return false;
+    }
+    return _data['comicSpecificSettings']["$comicId@$sourceKey"]?["enabled"] ==
+        true;
+  }
+
+  dynamic getReaderSetting(String comicId, String sourceKey, String key) {
+    if (!isComicSpecificSettingsEnabled(comicId, sourceKey)) {
+      return _data[key];
+    }
+    return _data['comicSpecificSettings']["$comicId@$sourceKey"]?[key] ??
+        _data[key];
+  }
+
+  void setReaderSetting(
+    String comicId,
+    String sourceKey,
+    String key,
+    dynamic value,
+  ) {
+    (_data['comicSpecificSettings'] as Map<String, dynamic>).putIfAbsent(
+      "$comicId@$sourceKey",
+      () => <String, dynamic>{},
+    )[key] = _normalizeNumericSetting(
+      key,
+      value,
+    );
+    notifyListeners();
+  }
+
+  void resetComicReaderSettings(String key) {
+    (_data['comicSpecificSettings'] as Map).remove(key);
+    notifyListeners();
+  }
+
+  @override
+  String toString() {
+    return _data.toString();
+  }
+}
+
+const defaultCustomImageProcessing = '''
+/**
+ * Process an image
+ * @param image {ArrayBuffer} - The image to process
+ * @param cid {string} - The comic ID
+ * @param eid {string} - The episode ID
+ * @param page {number} - The page number
+ * @param sourceKey {string} - The source key
+ * @returns {Promise<ArrayBuffer> | {image: Promise<ArrayBuffer>, onCancel: () => void}} - The processed image
+ */
+async function processImage(image, cid, eid, page, sourceKey) {
+    let futureImage = new Promise((resolve, reject) => {
+        resolve(image);
+    });
+    return futureImage;
+}
+''';
+
+const _defaultSourceListUrl =
+    "https://cdn.jsdelivr.net/gh/venera-app/venera-configs@main/index.json";
