@@ -237,7 +237,7 @@ uint64_t ValidateEncodedImage(const uint8_t* bytes, size_t length) {
           width = (static_cast<int64_t>(bytes[offset + 5]) << 8) | bytes[offset + 6];
           break;
         }
-        offset += 2 + segment;
+        offset += segment;
       }
     }
 #endif
