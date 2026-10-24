@@ -83,9 +83,14 @@ jobs:
           if gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" "${FILES[@]}" --clobber --repo "$GH_REPO"
           else
+            NOTES="release-notes/${RELEASE_TAG#cmanga-v}.md"
+            if [ ! -f "$NOTES" ]; then
+              NOTES="$RUNNER_TEMP/cmanga-release-notes.md"
+              printf '%s\n' "CManga builds from $SOURCE_SHA. The iOS IPA is unsigned and requires your own signing. Native AI is supported on Windows, Android, macOS and iOS; Linux is a reader-only build." > "$NOTES"
+            fi
             gh release create "$RELEASE_TAG" "${FILES[@]}" \
               --repo "$GH_REPO" \
               --title "CManga ${RELEASE_TAG#cmanga-v}" \
-              --notes "CManga builds from $SOURCE_SHA. The iOS IPA is unsigned and requires your own signing. Native AI is supported on Windows, Android, macOS and iOS; Linux is a reader-only build." \
+              --notes-file "$NOTES" \
               --target "$SOURCE_SHA"
           fi
