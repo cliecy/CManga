@@ -158,7 +158,14 @@ struct Job {
   [self invalidateWork];
 }
 - (void)enteredForeground:(NSNotification*)notification { _background = NO; }
-- (void)terminating:(NSNotification*)notification { [self close]; }
+- (void)terminating:(NSNotification*)notification {
+  [self close];
+  // AppKit/UIKit may enter exit() as soon as this notification returns.
+  // Cancel first, then drain all inference and release work before ORT/Dawn
+  // process globals are destroyed. Worker jobs never wait for main-queue replies.
+  // Drain even if close was already called (e.g. after an engine detach).
+  dispatch_sync(_queue, ^{});
+}
 
 - (void)close {
   if (_closed) return;

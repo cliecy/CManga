@@ -16,6 +16,9 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Test native AI termination ordering
+        run: python3 native/apple/tests/test_termination.py
+
       - name: Restore pinned native Metal runtime
         id: metal-cache
         uses: actions/cache/restore@v4
