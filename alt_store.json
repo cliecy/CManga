@@ -1,9 +1,47 @@
 {
   "name": "CManga",
   "identifier": "com.cmanga.reader.source",
+  "website": "https://github.com/cliecy/CManga",
   "subtitle": "Comics, with local AI.",
-  "description": "CManga is an independent comic reader with local AI enhancement, colorization and translation. No CManga iOS release is published in this source yet. Generate this feed from the configured CManga release repository after publishing a verified CManga IPA.",
+  "description": "CManga is an independent comic reader with local AI enhancement, colorization and translation. IPAs require your own signing.",
   "tintColor": "#167D8D",
-  "apps": [],
+  "iconURL": "https://raw.githubusercontent.com/cliecy/CManga/main/assets/app_icon.png",
+  "apps": [
+    {
+      "name": "CManga",
+      "bundleIdentifier": "com.cmanga.reader",
+      "developerName": "cliecy",
+      "subtitle": "Comics, with local AI.",
+      "localizedDescription": "CManga is an independent comic reader with local AI enhancement, colorization and translation. IPAs require your own signing.",
+      "iconURL": "https://raw.githubusercontent.com/cliecy/CManga/main/assets/app_icon.png",
+      "tintColor": "#167D8D",
+      "category": "books",
+      "versions": [
+        {
+          "version": "3.0.1",
+          "buildVersion": "301",
+          "downloadURL": "https://github.com/cliecy/CManga/releases/download/cmanga-v3.0.1/cmanga-ios-3.0.1%2B301.ipa",
+          "size": 36059573,
+          "minOSVersion": "16.3",
+          "date": "2026-10-24T04:44:49Z",
+          "localizedDescription": "## CManga 3.0.1 · 稳定性修复\n\n### 本次更新\n\n- 修复 macOS 在使用本地图像 AI 后退出时可能发生的崩溃：退出前取消任务，并等待推理与 GPU 会话释放完成，避免和 ONNX Runtime / Dawn 的全局资源销毁发生竞争。Apple 平台共用此清理逻辑。\n- 增加退出顺序回归测试，并接入 macOS CI，覆盖正在执行的任务、提前关闭、重复退出通知和回调不重复完成。\n- 修复便携图像头解析器中 JPEG 段遍历的长度偏移问题。\n- 版本号更新为 `3.0.1+301`，本次发布使用重新编译的安装包。\n\n### 下载与验证说明\n\n- 各平台安装包在相应构建成功后陆续附加到本页，请按文件名选择平台。\n- iOS IPA 未签名，需要自行签名后安装。\n- 退出回归测试使用受控的模拟引擎验证清理顺序；它不能替代真实 Metal 设备上的完整退出测试。\n- 退出时需等待资源清理完成，正在加载大模型时可能需要更久。\n\n### 后续改进建议（本版尚未实现）\n\n1. 在 macOS 使用异步退出协调，后台完成资源清理后再允许退出，减少主线程等待。\n2. 将原生依赖的缓存键与构建身份统一，纳入 Xcode 版本，减少工具链更新后的重复编译。\n3. 补充真实 GPU 场景测试：模型加载中退出、推理中退出、切换模型后退出，以及多次启动与退出。\n\n### English\n\nFixes an Apple image AI shutdown race by cancelling work and draining inference and session cleanup before ONNX Runtime / Dawn global teardown. Adds macOS CI regression coverage for shutdown ordering and duplicate callbacks, and includes the JPEG segment-length parsing fix. Packages are rebuilt as `3.0.1+301` and attached as each platform build succeeds. The iOS IPA is unsigned. Asynchronous macOS shutdown, toolchain-aware dependency caching, and real-GPU shutdown stress tests remain planned improvements.\n"
+        },
+        {
+          "version": "3.0.0",
+          "buildVersion": "300",
+          "downloadURL": "https://github.com/cliecy/CManga/releases/download/cmanga-v3.0.0/cmanga-ios-3.0.0%2B300.ipa",
+          "size": 36057934,
+          "minOSVersion": "16.3",
+          "date": "2026-09-27T04:32:02Z",
+          "localizedDescription": "CManga builds from a07bae044629e7e92449f3ffb2a6bb969bbab461. The iOS IPA is unsigned and requires your own signing. Native AI is supported on Windows, Android, macOS and iOS; Linux is a reader-only build."
+        }
+      ],
+      "version": "3.0.1",
+      "versionDate": "2026-10-24T04:44:49Z",
+      "versionDescription": "## CManga 3.0.1 · 稳定性修复\n\n### 本次更新\n\n- 修复 macOS 在使用本地图像 AI 后退出时可能发生的崩溃：退出前取消任务，并等待推理与 GPU 会话释放完成，避免和 ONNX Runtime / Dawn 的全局资源销毁发生竞争。Apple 平台共用此清理逻辑。\n- 增加退出顺序回归测试，并接入 macOS CI，覆盖正在执行的任务、提前关闭、重复退出通知和回调不重复完成。\n- 修复便携图像头解析器中 JPEG 段遍历的长度偏移问题。\n- 版本号更新为 `3.0.1+301`，本次发布使用重新编译的安装包。\n\n### 下载与验证说明\n\n- 各平台安装包在相应构建成功后陆续附加到本页，请按文件名选择平台。\n- iOS IPA 未签名，需要自行签名后安装。\n- 退出回归测试使用受控的模拟引擎验证清理顺序；它不能替代真实 Metal 设备上的完整退出测试。\n- 退出时需等待资源清理完成，正在加载大模型时可能需要更久。\n\n### 后续改进建议（本版尚未实现）\n\n1. 在 macOS 使用异步退出协调，后台完成资源清理后再允许退出，减少主线程等待。\n2. 将原生依赖的缓存键与构建身份统一，纳入 Xcode 版本，减少工具链更新后的重复编译。\n3. 补充真实 GPU 场景测试：模型加载中退出、推理中退出、切换模型后退出，以及多次启动与退出。\n\n### English\n\nFixes an Apple image AI shutdown race by cancelling work and draining inference and session cleanup before ONNX Runtime / Dawn global teardown. Adds macOS CI regression coverage for shutdown ordering and duplicate callbacks, and includes the JPEG segment-length parsing fix. Packages are rebuilt as `3.0.1+301` and attached as each platform build succeeds. The iOS IPA is unsigned. Asynchronous macOS shutdown, toolchain-aware dependency caching, and real-GPU shutdown stress tests remain planned improvements.\n",
+      "downloadURL": "https://github.com/cliecy/CManga/releases/download/cmanga-v3.0.1/cmanga-ios-3.0.1%2B301.ipa",
+      "size": 36059573
+    }
+  ],
   "news": []
 }
